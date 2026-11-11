@@ -18,6 +18,53 @@ go build -o udev .
 
 确保 `$(go env GOPATH)/bin` 或 `$(go env GOBIN)` 在 `PATH` 中。
 
+## 无需 Go：纯 Bash 版
+
+`udev.sh` 是同一套命令的纯 Bash 实现，只依赖 `bash`、`tar`、`git`，下载需要 `curl` 或 `wget`，适合还没装 Go 的新机器。它复用同一份 `~/.udev/config.yaml` 与备份目录，可与 Go 版交替使用。
+
+```bash
+chmod +x udev.sh
+./udev.sh status                            # 直接运行
+install -m 755 udev.sh ~/.local/bin/udev    # 或安装到 PATH 后直接 udev
+```
+
+支持的命令与参数和 Go 版一致（含 Tab 补全）：
+
+```bash
+udev install --cn pyenv g nvm
+udev backup all
+udev tools node go
+udev uninstall -y -k
+```
+
+一键运行（不下载、不安装，直接执行）：
+
+```bash
+# 查看状态
+bash <(curl -fsSL https://raw.githubusercontent.com/HanamiSakiP/udev/main/udev.sh) status
+
+# 安装全部工具链（参数与本地运行完全相同）
+bash <(curl -fsSL https://raw.githubusercontent.com/HanamiSakiP/udev/main/udev.sh) install --cn all
+
+# 没有 curl 时可用 wget
+bash <(wget -qO- https://raw.githubusercontent.com/HanamiSakiP/udev/main/udev.sh) status
+```
+
+一键安装到 `PATH`：
+
+```bash
+mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/HanamiSakiP/udev/main/udev.sh -o ~/.local/bin/udev && chmod +x ~/.local/bin/udev
+```
+
+> 用 `bash <(curl ...)`（进程替换）而不是 `curl ... | bash`，这样 `uninstall` 等需要确认的命令仍能从终端读取输入。
+
+差异说明：
+
+- 需要 bash 4.3+（macOS 自带 3.2，可 `brew install bash` 后用 `bash udev.sh`），以及 GNU tar
+- `config show` 直接打印配置文件原文；Go 版输出的是与默认值合并后的结果
+- 未安装 `curl` 时会自动回退到 `wget`
+- 备份文件、目录布局、shell 配置规则与 Go 版一致，两个版本可以互相恢复
+
 ## Tab 补全
 
 生成补全脚本：
