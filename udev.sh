@@ -625,7 +625,10 @@ excludes_without() { # item...
 
 copy_tree() { # src dst（合并复制，保留权限/时间/软链接）
   mkdir -p "$2" || return 1
-  cp -a "$1/." "$2/" 2>/dev/null
+  if cp -af "$1/." "$2/" 2>/dev/null; then return 0; fi
+  # 只读缓存（如 Go module cache）无法直接覆盖时，先恢复可写再重试。
+  find "$2" -xdev ! -writable -exec chmod u+w {} + 2>/dev/null
+  cp -af "$1/." "$2/" 2>/dev/null
 }
 
 copy_path() { # src dst（先删除再复制）
@@ -664,24 +667,34 @@ backup_path() {
 
 find_backups() {
   local tool=$1 dir f
+  local -a dirs=(
+    "$BACKUP_DIR/$tool" "$BACKUP_DIR"
+    "$HOME_DIR/backups/$tool" "$HOME_DIR/backups"
+    "$HOME_DIR/backup/$tool" "$HOME_DIR/backup"
+  )
+  local -A seen=()
   local -a found=()
-  for dir in "$BACKUP_DIR/$tool" "$BACKUP_DIR"; do
-    found=()
+  for dir in "${dirs[@]}"; do
+    [[ -n $dir ]] || continue
     for f in "$dir/${tool}_backup_"*.tar.gz; do
-      [[ -e $f ]] && found+=("$f")
+      [[ -e $f ]] || continue
+      [[ -n ${seen[$f]+x} ]] && continue
+      seen[$f]=1
+      found+=("$f")
     done
-    if ((${#found[@]})); then
-      printf '%s\n' "${found[@]}"
-      return 0
-    fi
   done
-  return 0
+  ((${#found[@]})) || return 0
+  printf '%s\n' "${found[@]}" | sort
 }
 
 latest_backup() {
   local -a files=()
+  local f latest=""
   mapfile -t files < <(find_backups "$1")
-  ((${#files[@]})) && printf '%s' "${files[${#files[@]}-1]}"
+  for f in "${files[@]}"; do
+    [[ -z $latest || ${f##*/} > ${latest##*/} ]] && latest=$f
+  done
+  [[ -n $latest ]] && printf '%s' "$latest"
 }
 
 count_backups() {
@@ -1123,7 +1136,7 @@ g_restore() {
         [[ -e $child ]] || continue
         target="$HOME/.config/$(basename "$child")"
         subst "恢复 .config/$(basename "$child") → $target"
-        if ! copy_path "$child" "$target"; then rm -rf "$tmp"; return 1; fi
+        if ! copy_tree "$child" "$target"; then rm -rf "$tmp"; return 1; fi
       done
       continue
     fi
@@ -1143,7 +1156,7 @@ g_restore() {
       *) target="$HOME/$base" ;;
     esac
     subst "恢复 $base → $target"
-    if ! copy_path "$f" "$target"; then rm -rf "$tmp"; return 1; fi
+    if ! copy_tree "$f" "$target"; then rm -rf "$tmp"; return 1; fi
   done
   rm -rf "$tmp"
 

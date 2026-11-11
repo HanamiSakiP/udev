@@ -161,6 +161,26 @@ func (m *gManager) Restore(archive string) error {
 		if !entry.IsDir() {
 			continue
 		}
+		if base == ".config" {
+			// 只合并 ~/.config 下备份的子项，避免覆盖用户已有的其他配置。
+			configDir := filepath.Join(home, ".config")
+			if err := os.MkdirAll(configDir, 0o755); err != nil {
+				return err
+			}
+			children, err := os.ReadDir(src)
+			if err != nil {
+				return err
+			}
+			for _, child := range children {
+				childSrc := filepath.Join(src, child.Name())
+				target := filepath.Join(configDir, child.Name())
+				m.e.UI.Subst("恢复 .config/%s → %s", child.Name(), target)
+				if err := util.MergePath(childSrc, target); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		var target string
 		switch {
 		case base == "_go":
@@ -177,7 +197,7 @@ func (m *gManager) Restore(archive string) error {
 			target = filepath.Join(home, base)
 		}
 		m.e.UI.Subst("恢复 %s → %s", base, target)
-		if err := util.CopyPath(src, target); err != nil {
+		if err := util.MergePath(src, target); err != nil {
 			return err
 		}
 	}

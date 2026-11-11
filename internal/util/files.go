@@ -265,6 +265,22 @@ func CopyTree(src, dst string) error {
 	})
 }
 
+// MergePath 将 src 目录合并到 dst，保留 dst 中已有的其他内容。
+// 适用于 GOPATH 等包含只读缓存、不能整体删除的目标目录。
+func MergePath(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return CopyPath(src, dst)
+	}
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return CopyTree(src, dst)
+}
+
 // CopyPath 先删除 dst，再完整复制 src（文件、目录或软链接）。
 func CopyPath(src, dst string) error {
 	info, err := os.Lstat(src)
@@ -307,6 +323,14 @@ func copyEntry(src, dst string, info os.FileInfo) error {
 	}
 	defer in.Close()
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	// 目标文件可能是只读的（例如 Go module cache），先删除再写入；
+	// 若所在目录也不可写，则保留已有文件，避免触发整体回滚。
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		if st, statErr := os.Stat(dst); statErr == nil && st.Mode().IsRegular() {
+			return nil
+		}
 		return err
 	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())

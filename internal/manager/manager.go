@@ -132,21 +132,47 @@ func BackupPath(cfg *config.Config, tool string) (string, error) {
 	return filepath.Join(dir, fmt.Sprintf("%s_backup_%s.tar.gz", tool, time.Now().Format("20060102150405"))), nil
 }
 
-// FindBackups 查找工具备份；优先工具子目录，其次备份根目录。
+// FindBackups 查找工具备份。
+//
+// 除当前配置的备份目录外，也会查找 ~/.udev/backups 与旧版的 ~/.udev/backup，
+// 避免升级或修改 backup_dir 后找不到已有备份。
 func FindBackups(cfg *config.Config, tool string) []string {
 	dirs := []string{
 		filepath.Join(cfg.Paths.BackupDir, tool),
 		cfg.Paths.BackupDir,
+		filepath.Join(cfg.Home, "backups", tool),
+		filepath.Join(cfg.Home, "backups"),
+		filepath.Join(cfg.Home, "backup", tool),
+		filepath.Join(cfg.Home, "backup"),
 	}
+	seenDirs := map[string]bool{}
+	seenFiles := map[string]bool{}
+	var files []string
 	for _, dir := range dirs {
-		matches, err := filepath.Glob(filepath.Join(dir, tool+"_backup_*.tar.gz"))
-		if err != nil || len(matches) == 0 {
+		if dir == "" {
 			continue
 		}
-		sort.Strings(matches)
-		return matches
+		dir = filepath.Clean(dir)
+		if seenDirs[dir] {
+			continue
+		}
+		seenDirs[dir] = true
+
+		matches, err := filepath.Glob(filepath.Join(dir, tool+"_backup_*.tar.gz"))
+		if err != nil {
+			continue
+		}
+		for _, f := range matches {
+			f = filepath.Clean(f)
+			if seenFiles[f] {
+				continue
+			}
+			seenFiles[f] = true
+			files = append(files, f)
+		}
 	}
-	return nil
+	sort.Strings(files)
+	return files
 }
 
 // LatestBackup 返回最新备份。
@@ -155,7 +181,13 @@ func LatestBackup(cfg *config.Config, tool string) string {
 	if len(files) == 0 {
 		return ""
 	}
-	return files[len(files)-1]
+	latest := files[0]
+	for _, f := range files[1:] {
+		if filepath.Base(f) > filepath.Base(latest) {
+			latest = f
+		}
+	}
+	return latest
 }
 
 // CountBackups 返回备份数量。
