@@ -21,6 +21,8 @@ type Config struct {
 	Managers  ManagersConfig  `yaml:"managers"`
 	DevTools  DevToolsConfig  `yaml:"dev_tools"`
 	Uninstall UninstallConfig `yaml:"uninstall"`
+	Storage   StorageConfig   `yaml:"storage"`
+	Update    UpdateConfig    `yaml:"update"`
 }
 
 // MirrorConfig 镜像相关配置。
@@ -74,6 +76,23 @@ type RustManager struct {
 // UninstallConfig 卸载行为配置。
 type UninstallConfig struct {
 	IncludeGopath bool `yaml:"include_gopath"` // 卸载 g 时是否默认删除 GOPATH
+}
+
+// StorageConfig 备份存储、凭据与 restic 仓库的默认位置。
+type StorageConfig struct {
+	DefaultName  string `yaml:"default_name"`  // 默认存储名，默认 udev
+	Provider     string `yaml:"provider"`      // pcloud | onedrive | dropbox，默认 pcloud
+	RemoteName   string `yaml:"remote_name"`   // rclone 远程名，空则 <name>-<provider>
+	ResticRepo   string `yaml:"restic_repo"`   // restic 仓库地址，空则 <home>/restic/<name>
+	SecretsDir   string `yaml:"secrets_dir"`   // 密码/token 目录，空则 <home>/secrets
+	RcloneConfig string `yaml:"rclone_config"` // rclone 配置，空则 <home>/rclone/rclone.conf
+	SourceDir    string `yaml:"source_dir"`    // 工具源码目录，空则 <home>/source
+}
+
+// UpdateConfig 自更新来源配置（GitHub）。
+type UpdateConfig struct {
+	Repo   string `yaml:"repo"`   // owner/repo，默认 HanamiSakiP/udev
+	Branch string `yaml:"branch"` // 没有 Release 时使用分支，默认 main
 }
 
 // DevToolsConfig 是开发工具的所有可自定义清单。
@@ -326,6 +345,17 @@ func Defaults(home string) *Config {
 			},
 		},
 		Uninstall: UninstallConfig{IncludeGopath: true},
+		Storage: StorageConfig{
+			DefaultName:  "udev",
+			Provider:     "pcloud",
+			SecretsDir:   filepath.Join(home, "secrets"),
+			RcloneConfig: filepath.Join(home, "rclone", "rclone.conf"),
+			SourceDir:    filepath.Join(home, "source"),
+		},
+		Update: UpdateConfig{
+			Repo:   "HanamiSakiP/udev",
+			Branch: "main",
+		},
 	}
 	return c
 }
@@ -420,6 +450,27 @@ func (c *Config) fillEmpty(d *Config) {
 	if c.Managers.Fvm.InstallURL == "" {
 		c.Managers.Fvm.InstallURL = d.Managers.Fvm.InstallURL
 	}
+	if c.Storage.DefaultName == "" {
+		c.Storage.DefaultName = d.Storage.DefaultName
+	}
+	if c.Storage.Provider == "" {
+		c.Storage.Provider = d.Storage.Provider
+	}
+	if c.Storage.SecretsDir == "" {
+		c.Storage.SecretsDir = d.Storage.SecretsDir
+	}
+	if c.Storage.RcloneConfig == "" {
+		c.Storage.RcloneConfig = d.Storage.RcloneConfig
+	}
+	if c.Storage.SourceDir == "" {
+		c.Storage.SourceDir = d.Storage.SourceDir
+	}
+	if c.Update.Repo == "" {
+		c.Update.Repo = d.Update.Repo
+	}
+	if c.Update.Branch == "" {
+		c.Update.Branch = d.Update.Branch
+	}
 }
 
 // Ensure 创建配置目录与默认配置文件，返回是否为本次新建。
@@ -485,6 +536,8 @@ func (c *Config) Reset() error {
 	c.Managers = d.Managers
 	c.DevTools = d.DevTools
 	c.Uninstall = d.Uninstall
+	c.Storage = d.Storage
+	c.Update = d.Update
 	return c.Save()
 }
 
@@ -535,12 +588,19 @@ func (c *Config) expand() {
 	c.Paths.CargoHome = expandPath(c.Paths.CargoHome)
 	c.Paths.FvmCache = expandPath(c.Paths.FvmCache)
 	c.Paths.FvmInstall = expandPath(c.Paths.FvmInstall)
+	c.Storage.ResticRepo = expandPath(c.Storage.ResticRepo)
+	c.Storage.SecretsDir = expandPath(c.Storage.SecretsDir)
+	c.Storage.RcloneConfig = expandPath(c.Storage.RcloneConfig)
+	c.Storage.SourceDir = expandPath(c.Storage.SourceDir)
 	for i := range c.Shell.Files {
 		c.Shell.Files[i] = expandPath(c.Shell.Files[i])
 	}
 }
 
 func expandPath(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
 	p = os.ExpandEnv(p)
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		home, err := os.UserHomeDir()
@@ -588,3 +648,98 @@ func (c *Config) RustupBin() string { return filepath.Join(c.Paths.CargoHome, "b
 
 // FvmBin fvm 可执行文件。
 func (c *Config) FvmBin() string { return filepath.Join(c.Paths.FvmInstall, "bin", "fvm") }
+
+// StorageName 返回本次使用的存储名；name 为空时使用配置中的默认值。
+func (c *Config) StorageName(name string) string {
+	name = strings.TrimSpace(name)
+	if name != "" {
+		return name
+	}
+	if v := strings.TrimSpace(c.Storage.DefaultName); v != "" {
+		return v
+	}
+	return "udev"
+}
+
+// StorageProvider 返回默认云存储类型。
+func (c *Config) StorageProvider() string {
+	p := strings.ToLower(strings.TrimSpace(c.Storage.Provider))
+	if p == "" {
+		return "pcloud"
+	}
+	return p
+}
+
+// RemoteName 返回 rclone 远程名；未显式配置时使用 <name>-<provider>。
+func (c *Config) RemoteName(name string) string {
+	if v := strings.TrimSpace(c.Storage.RemoteName); v != "" {
+		return v
+	}
+	return c.StorageName(name) + "-" + c.StorageProvider()
+}
+
+// SecretsDir 密码/token 文件的本地目录。
+func (c *Config) SecretsDir() string {
+	if v := strings.TrimSpace(c.Storage.SecretsDir); v != "" {
+		return expandPath(v)
+	}
+	return filepath.Join(c.Home, "secrets")
+}
+
+// RcloneConfig 本地 rclone 配置文件路径。
+func (c *Config) RcloneConfig() string {
+	if v := strings.TrimSpace(c.Storage.RcloneConfig); v != "" {
+		return expandPath(v)
+	}
+	return filepath.Join(c.Home, "rclone", "rclone.conf")
+}
+
+// SourceDir 工具源码的本地目录。
+func (c *Config) SourceDir() string {
+	if v := strings.TrimSpace(c.Storage.SourceDir); v != "" {
+		return expandPath(v)
+	}
+	return filepath.Join(c.Home, "source")
+}
+
+// ResticRepo 返回 restic 仓库地址；默认位于本地目录。
+func (c *Config) ResticRepo(name string) string {
+	if v := strings.TrimSpace(c.Storage.ResticRepo); v != "" {
+		return expandPath(v)
+	}
+	return filepath.Join(c.Home, "restic", c.StorageName(name))
+}
+
+// ResticPasswordFile 返回 restic 密码文件路径。
+func (c *Config) ResticPasswordFile(name string) string {
+	return filepath.Join(c.SecretsDir(), "restic-"+safeFileName(c.StorageName(name))+".pass")
+}
+
+// GhTokenFile 返回 gh token 的本地文件路径。
+func (c *Config) GhTokenFile() string {
+	return filepath.Join(c.SecretsDir(), "gh-token")
+}
+
+// RcloneRemotePasswordFile 返回 rclone 远程保存的密码文件路径。
+func (c *Config) RcloneRemotePasswordFile(remote string) string {
+	return filepath.Join(c.SecretsDir(), safeFileName(remote)+".pass")
+}
+
+// safeFileName 去掉路径分隔符等不适合作为文件名的字符。
+func safeFileName(name string) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
+}

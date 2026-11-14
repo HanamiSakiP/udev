@@ -13,7 +13,7 @@ import (
 
 var topLevelCandidates = []string{
 	"install", "backup", "restore", "status", "list",
-	"tools", "uninstall", "config", "completion", "version", "help",
+	"tools", "uninstall", "update", "setup", "config", "completion", "version", "help",
 	"--help", "--version", "-h", "-v",
 }
 
@@ -21,6 +21,15 @@ var toolCandidates = []string{"pyenv", "g", "nvm", "rust", "fvm", "all"}
 var sectionCandidates = []string{"node", "go", "python", "cargo", "all"}
 var configCandidates = []string{"show", "path", "init", "edit", "--help", "-h"}
 var shellCandidates = []string{"bash", "zsh", "fish"}
+var setupCandidates = []string{
+	"all", "gh", "cloud", "restic", "status",
+	"pcloud", "onedrive", "dropbox",
+	"--name", "-n", "--provider", "-p", "--remote", "--repo",
+	"--password-file", "--secrets-dir", "--token", "--token-file",
+	"--hostname", "--git-protocol", "--user", "--pcloud-password",
+	"--no-gh", "--no-cloud", "--no-restic", "--force", "-f", "--help", "-h",
+}
+var updateFlags = []string{"--check", "-n", "--force", "-f", "--source-only", "--help", "-h"}
 
 var installFlags = []string{"--cn", "-c", "--force", "-f", "--no-restore", "--no-modify-path", "--help", "-h"}
 var backupFlags = []string{"--help", "-h"}
@@ -69,6 +78,10 @@ func completeWords(words []string) []string {
 			return nil
 		}
 		return filterUsed(append(append([]string{}, shellCandidates...), "install", "--help", "-h"), used)
+	case "update", "upgrade", "up":
+		return filterUsed(updateFlags, used)
+	case "setup", "init":
+		return filterUsed(setupCandidates, used)
 	case "status", "st", "s", "version", "help":
 		return filterUsed([]string{"--help", "-h"}, used)
 	}
@@ -83,7 +96,8 @@ func findCommand(used []string) string {
 		switch w {
 		case "install", "i", "backup", "b", "restore", "r", "recover",
 			"status", "st", "s", "list", "ls", "l", "tools", "dev", "dev-tool",
-			"uninstall", "remove", "rm", "config", "cfg", "completion":
+			"uninstall", "remove", "rm", "config", "cfg", "completion",
+			"update", "upgrade", "up", "setup", "init":
 			return w
 		}
 		return ""

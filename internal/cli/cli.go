@@ -15,6 +15,8 @@ import (
 	"github.com/hanamisakip/udev/internal/config"
 	"github.com/hanamisakip/udev/internal/devtools"
 	"github.com/hanamisakip/udev/internal/manager"
+	"github.com/hanamisakip/udev/internal/selfupdate"
+	"github.com/hanamisakip/udev/internal/storage"
 	"github.com/hanamisakip/udev/internal/ui"
 	"github.com/hanamisakip/udev/internal/uninstall"
 )
@@ -59,6 +61,9 @@ func Run(args []string) int {
 	if created {
 		u.Infof("已生成默认配置: %s", cfg.File)
 	}
+	if _, err := selfupdate.SyncSource(cfg, u, Version); err != nil {
+		u.Warnf("同步工具源码失败: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -86,6 +91,18 @@ func Run(args []string) int {
 		err = cmdConfig(cfg, u, rest)
 	case "completion", "comp":
 		err = cmdCompletion(cfg, u, rest)
+	case "update", "upgrade", "up":
+		if hasHelp(rest) {
+			printHelp(u)
+			return 0
+		}
+		err = selfupdate.Update(ctx, cfg, u, Version, rest)
+	case "setup", "init":
+		if hasHelp(rest) {
+			storage.PrintHelp(u)
+			return 0
+		}
+		err = storage.RunSetup(ctx, cfg, u, rest)
 	default:
 		u.Errorf("未知命令: %s", cmd)
 		printHelp(u)
@@ -327,6 +344,8 @@ func cmdStatus(cfg *config.Config, u *ui.UI) error {
 	fmt.Fprintf(u.Out, "\n配置目录: %s\n", cfg.Home)
 	fmt.Fprintf(u.Out, "配置文件: %s\n", cfg.File)
 	fmt.Fprintf(u.Out, "备份目录: %s\n", cfg.Paths.BackupDir)
+	fmt.Fprintf(u.Out, "源码目录: %s\n", cfg.SourceDir())
+	fmt.Fprintf(u.Out, "远程存储: %s（%s），restic 仓库: %s\n", cfg.RemoteName(""), cfg.StorageProvider(), cfg.ResticRepo(""))
 	return nil
 }
 
@@ -433,6 +452,15 @@ func cmdConfig(cfg *config.Config, u *ui.UI, args []string) error {
 	}
 }
 
+func hasHelp(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 func collectToolArgs(u *ui.UI, args []string) ([]string, bool, error) {
 	var names []string
 	for _, a := range args {
@@ -504,6 +532,8 @@ func printHelp(u *ui.UI) {
   list      列出可用备份
   tools     按配置文件批量安装开发工具
   uninstall 卸载工具链并清理 shell 配置
+  update    从 GitHub 更新 udev 自身，并同步本地源码
+  setup     一键配置 gh 登录、云存储与 restic 本地仓库
   config    查看/编辑配置（show | path | init | edit）
   completion 生成或安装 shell Tab 补全（bash | zsh | fish | install）
   version   显示版本
@@ -525,6 +555,15 @@ uninstall 选项:
   -y, --yes         跳过确认
   -k, --keep-gopath 保留 GOPATH
 
+update 选项:
+  --check, -n       仅检查是否有新版本
+  --force, -f       强制重新同步源码并更新
+  --source-only     只更新 ~/.udev/source，不替换二进制
+
+setup 子命令:
+  all | gh | cloud | restic | status
+  默认执行 all；云存储支持 pcloud | onedrive | dropbox
+
 tools 分组:
   node | go | python | cargo | all
   默认执行 node go python
@@ -542,6 +581,9 @@ tools 分组:
   udev tools node go
   udev tools all
   udev uninstall -y -k
+  udev update
+  udev setup
+  udev setup cloud onedrive --name udev
   udev config edit
 
 说明:
