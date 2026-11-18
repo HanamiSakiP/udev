@@ -79,7 +79,18 @@ func RunScript(u *ui.UI, desc, interpreter, script string, args []string, env []
 
 // RunCmd 执行命令并显示旋转进度条。
 func RunCmd(u *ui.UI, desc string, env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	return RunCmdContext(context.Background(), u, desc, env, name, args...)
+}
+
+// RunCmdContext 执行命令并显示旋转进度条，可通过 ctx 取消。
+func RunCmdContext(ctx context.Context, u *ui.UI, desc string, env []string, name string, args ...string) error {
+	return RunCmdInContext(ctx, "", u, desc, env, name, args...)
+}
+
+// RunCmdInContext 在指定目录执行命令并显示旋转进度条。
+func RunCmdInContext(ctx context.Context, dir string, u *ui.UI, desc string, env []string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
 	return runWithSpinner(u, desc, cmd)

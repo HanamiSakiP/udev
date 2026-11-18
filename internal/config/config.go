@@ -23,6 +23,7 @@ type Config struct {
 	Uninstall UninstallConfig `yaml:"uninstall"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Update    UpdateConfig    `yaml:"update"`
+	Repos     ReposConfig     `yaml:"repos"`
 }
 
 // MirrorConfig 镜像相关配置。
@@ -93,6 +94,27 @@ type StorageConfig struct {
 type UpdateConfig struct {
 	Repo   string `yaml:"repo"`   // owner/repo，默认 HanamiSakiP/udev
 	Branch string `yaml:"branch"` // 没有 Release 时使用分支，默认 main
+}
+
+// ReposConfig 批量克隆/更新仓库的配置。
+type ReposConfig struct {
+	Dir      string   `yaml:"dir"`      // 克隆根目录，默认 <home>/git（即 ~/.udev/git）
+	Tool     string   `yaml:"tool"`     // auto | jj | git | gh，默认 auto（优先 jj）
+	Protocol string   `yaml:"protocol"` // https | ssh，默认 https
+	List     []string `yaml:"list"`     // owner/repo 或完整仓库地址
+}
+
+// DefaultRepoList 返回默认需要克隆/更新的仓库。
+func DefaultRepoList() []string {
+	return []string{
+		"dani-garcia/vaultwarden",
+		"h4ckf0r0day/obscura",
+		"localsend/localsend",
+		"HanamiSakiP/u-ani",
+		"HanamiSakiP/u-comic",
+		"HanamiSakiP/u-game",
+		"HanamiSakiP/udev",
+	}
 }
 
 // DevToolsConfig 是开发工具的所有可自定义清单。
@@ -293,6 +315,11 @@ func Defaults(home string) *Config {
 			Go: GoSection{
 				GVersion: "latest",
 				Packages: []GoPackage{
+					{Path: "github.com/asdf-vm/asdf/cmd/asdf@latest", Bin: "asdf"},
+					{Path: "github.com/HanamiSakiP/u-ani/cmd/uani@latest", Bin: "uani"},
+					{Path: "github.com/HanamiSakiP/u-comic/cmd/ucom@latest", Bin: "ucom"},
+					{Path: "github.com/HanamiSakiP/u-game/cmd/ugal@latest", Bin: "ugal"},
+					{Path: "github.com/jesseduffield/lazydocker@latest", Bin: "lazydocker"},
 					{Path: "github.com/restic/restic/cmd/restic@latest", Bin: "restic"},
 					{Path: "github.com/rclone/rclone@latest", Bin: "rclone"},
 					{Path: "github.com/junegunn/fzf@latest", Bin: "fzf"},
@@ -355,6 +382,12 @@ func Defaults(home string) *Config {
 		Update: UpdateConfig{
 			Repo:   "HanamiSakiP/udev",
 			Branch: "main",
+		},
+		Repos: ReposConfig{
+			Dir:      filepath.Join(home, "git"),
+			Tool:     "auto",
+			Protocol: "https",
+			List:     DefaultRepoList(),
 		},
 	}
 	return c
@@ -471,6 +504,15 @@ func (c *Config) fillEmpty(d *Config) {
 	if c.Update.Branch == "" {
 		c.Update.Branch = d.Update.Branch
 	}
+	if c.Repos.Dir == "" {
+		c.Repos.Dir = d.Repos.Dir
+	}
+	if c.Repos.Tool == "" {
+		c.Repos.Tool = d.Repos.Tool
+	}
+	if c.Repos.Protocol == "" {
+		c.Repos.Protocol = d.Repos.Protocol
+	}
 }
 
 // Ensure 创建配置目录与默认配置文件，返回是否为本次新建。
@@ -482,6 +524,12 @@ func (c *Config) Ensure() (bool, error) {
 		return false, err
 	}
 	if _, err := os.Stat(c.File); err == nil {
+		if _, err := c.EnsureGoPackages(); err != nil {
+			return false, err
+		}
+		if _, err := c.EnsureReposSection(); err != nil {
+			return false, err
+		}
 		return false, nil
 	} else if !os.IsNotExist(err) {
 		return false, err
@@ -491,6 +539,135 @@ func (c *Config) Ensure() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// EnsureGoPackages 检查配置文件中的 go install 清单，把新增的默认包追加进去。
+// 保留用户已有的条目、顺序与注释，返回是否写入了新内容。
+func (c *Config) EnsureGoPackages() (bool, error) {
+	data, err := os.ReadFile(c.File)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return false, err
+	}
+	root := &doc
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		root = doc.Content[0]
+	}
+	goNode := nodeMapValue(nodeMapValue(root, "dev_tools"), "go")
+	if goNode == nil || goNode.Kind != yaml.MappingNode {
+		return false, nil
+	}
+	pkgs := nodeMapValue(goNode, "packages")
+	if pkgs == nil {
+		pkgs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		goNode.Content = append(goNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "packages"}, pkgs)
+	} else if pkgs.Kind != yaml.SequenceNode {
+		return false, nil
+	}
+
+	seen := make(map[string]bool, len(pkgs.Content))
+	for _, item := range pkgs.Content {
+		var p GoPackage
+		if err := item.Decode(&p); err == nil && p.Path != "" {
+			seen[p.Path] = true
+		}
+	}
+
+	d := Defaults(c.Home)
+	seenMem := make(map[string]bool, len(c.DevTools.Go.Packages))
+	for _, p := range c.DevTools.Go.Packages {
+		seenMem[p.Path] = true
+	}
+	added := false
+	for _, p := range d.DevTools.Go.Packages {
+		if seen[p.Path] {
+			continue
+		}
+		var n yaml.Node
+		if err := n.Encode(p); err != nil {
+			return false, err
+		}
+		pkgs.Content = append(pkgs.Content, &n)
+		// 同步内存中的配置，让本次运行也能安装新增的包。
+		if !seenMem[p.Path] {
+			c.DevTools.Go.Packages = append(c.DevTools.Go.Packages, p)
+			seenMem[p.Path] = true
+		}
+		added = true
+	}
+	if !added {
+		return false, nil
+	}
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(c.File, out, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// nodeMapValue 返回 YAML 映射节点中指定键的值节点。
+func nodeMapValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// EnsureReposSection 检查配置文件中是否已有 repos 段，缺少时追加默认仓库清单。
+// 返回是否写入了新内容。
+func (c *Config) EnsureReposSection() (bool, error) {
+	data, err := os.ReadFile(c.File)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if hasTopLevelKey(data, "repos") {
+		return false, nil
+	}
+	d := Defaults(c.Home)
+	block, err := yaml.Marshal(struct {
+		Repos ReposConfig `yaml:"repos"`
+	}{Repos: d.Repos})
+	if err != nil {
+		return false, err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, []byte("\n# 仓库清单（默认值，可按需增删）\n")...)
+	data = append(data, block...)
+	if err := os.WriteFile(c.File, data, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func hasTopLevelKey(data []byte, key string) bool {
+	prefix := key + ":"
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimRight(line, "\r"), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Save 原子写入配置文件。
@@ -538,6 +715,7 @@ func (c *Config) Reset() error {
 	c.Uninstall = d.Uninstall
 	c.Storage = d.Storage
 	c.Update = d.Update
+	c.Repos = d.Repos
 	return c.Save()
 }
 
@@ -571,6 +749,8 @@ func (c *Config) applyEnv() {
 	set(&c.Mirror.Node, "CN_NODE_MIRROR")
 	set(&c.Mirror.Go, "CN_GO_MIRROR")
 	set(&c.Mirror.Python, "CN_PYTHON_MIRROR")
+	set(&c.Repos.Dir, "UDEV_REPOS_DIR")
+	set(&c.Repos.Tool, "UDEV_REPOS_TOOL")
 	if v := os.Getenv("UDEV_USE_CN"); v != "" {
 		c.Mirror.UseCN = truthy(v)
 	} else if v := os.Getenv("USE_CN_MIRROR"); v != "" {
@@ -592,6 +772,7 @@ func (c *Config) expand() {
 	c.Storage.SecretsDir = expandPath(c.Storage.SecretsDir)
 	c.Storage.RcloneConfig = expandPath(c.Storage.RcloneConfig)
 	c.Storage.SourceDir = expandPath(c.Storage.SourceDir)
+	c.Repos.Dir = expandPath(c.Repos.Dir)
 	for i := range c.Shell.Files {
 		c.Shell.Files[i] = expandPath(c.Shell.Files[i])
 	}

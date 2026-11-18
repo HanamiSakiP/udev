@@ -7,13 +7,14 @@ import (
 	"strings"
 
 	"github.com/hanamisakip/udev/internal/config"
+	"github.com/hanamisakip/udev/internal/repos"
 	"github.com/hanamisakip/udev/internal/ui"
 	"github.com/hanamisakip/udev/internal/util"
 )
 
 var topLevelCandidates = []string{
 	"install", "backup", "restore", "status", "list",
-	"tools", "uninstall", "update", "setup", "config", "completion", "version", "help",
+	"tools", "repos", "uninstall", "update", "setup", "config", "completion", "version", "help",
 	"--help", "--version", "-h", "-v",
 }
 
@@ -36,6 +37,7 @@ var backupFlags = []string{"--help", "-h"}
 var restoreFlags = []string{"--force", "-f", "--help", "-h"}
 var uninstallFlags = []string{"-y", "--yes", "-k", "--keep-gopath", "--help", "-h"}
 var toolsFlags = []string{"--help", "-h"}
+var reposFlags = []string{"--tool", "-t", "--dir", "-d", "--list", "-l", "--check", "-c", "--jj", "--git", "--gh", "--help", "-h"}
 
 // completeWords 根据已输入内容返回候选列表。
 // words 的最后一个元素是当前正在补全的词（可能为空）。
@@ -62,6 +64,14 @@ func completeWords(words []string) []string {
 		return filterUsed(append(append([]string{}, toolCandidates...), uninstallFlags...), used)
 	case "tools", "dev", "dev-tool":
 		return filterUsed(append(append([]string{}, sectionCandidates...), toolsFlags...), used)
+	case "repos", "repo", "clone":
+		cands := append([]string{}, reposFlags...)
+		if cfg, err := config.Load(); err == nil {
+			for _, spec := range cfg.Repos.List {
+				cands = append(cands, repos.RepoName(spec))
+			}
+		}
+		return filterUsed(cands, used)
 	case "config", "cfg":
 		if len(used) >= 2 && !strings.HasPrefix(used[1], "-") {
 			if used[1] == "init" {
@@ -96,6 +106,7 @@ func findCommand(used []string) string {
 		switch w {
 		case "install", "i", "backup", "b", "restore", "r", "recover",
 			"status", "st", "s", "list", "ls", "l", "tools", "dev", "dev-tool",
+			"repos", "repo", "clone",
 			"uninstall", "remove", "rm", "config", "cfg", "completion",
 			"update", "upgrade", "up", "setup", "init":
 			return w

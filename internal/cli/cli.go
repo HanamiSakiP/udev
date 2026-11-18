@@ -15,6 +15,7 @@ import (
 	"github.com/hanamisakip/udev/internal/config"
 	"github.com/hanamisakip/udev/internal/devtools"
 	"github.com/hanamisakip/udev/internal/manager"
+	"github.com/hanamisakip/udev/internal/repos"
 	"github.com/hanamisakip/udev/internal/selfupdate"
 	"github.com/hanamisakip/udev/internal/storage"
 	"github.com/hanamisakip/udev/internal/ui"
@@ -22,7 +23,7 @@ import (
 )
 
 // Version 由构建时通过 -ldflags 覆盖，或直接修改此处。
-var Version = "1.0.0"
+var Version = "1.0.1"
 
 // Run 执行命令行，返回进程退出码。
 func Run(args []string) int {
@@ -85,6 +86,12 @@ func Run(args []string) int {
 			return 0
 		}
 		err = devtools.Run(ctx, cfg, u, rest)
+	case "repos", "repo", "clone":
+		if hasHelp(rest) {
+			printHelp(u)
+			return 0
+		}
+		err = repos.Run(ctx, cfg, u, rest)
 	case "uninstall", "remove", "rm":
 		err = cmdUninstall(ctx, cfg, u, rest)
 	case "config", "cfg":
@@ -341,6 +348,11 @@ func cmdStatus(cfg *config.Config, u *ui.UI) error {
 	fmt.Fprintf(u.Out, "  python : pip %d 个\n", len(d.Python.Packages))
 	fmt.Fprintf(u.Out, "  cargo  : %d 个\n", len(d.Cargo.Packages))
 
+	fmt.Fprintf(u.Out, "\n%s\n", u.Bold("仓库清单"))
+	fmt.Fprintf(u.Out, "  目录   : %s\n", cfg.Repos.Dir)
+	fmt.Fprintf(u.Out, "  工具   : %s（auto 时优先 jj）\n", cfg.Repos.Tool)
+	fmt.Fprintf(u.Out, "  数量   : %d 个\n", len(cfg.Repos.List))
+
 	fmt.Fprintf(u.Out, "\n配置目录: %s\n", cfg.Home)
 	fmt.Fprintf(u.Out, "配置文件: %s\n", cfg.File)
 	fmt.Fprintf(u.Out, "备份目录: %s\n", cfg.Paths.BackupDir)
@@ -522,7 +534,7 @@ func humanSize(path string) string {
 func printHelp(u *ui.UI) {
 	help := fmt.Sprintf(`%s v%s - 一体化开发工具管理器
 
-用法: udev <命令> [选项] [工具/分组...]
+用法: udev <命令> [选项] [工具/分组/仓库...]
 
 命令:
   install   安装工具（优先本地备份恢复，否则在线安装）
@@ -531,6 +543,7 @@ func printHelp(u *ui.UI) {
   status    查看工具安装状态、版本与备份数量
   list      列出可用备份
   tools     按配置文件批量安装开发工具
+  repos     一键批量克隆/更新配置中的仓库（优先 jj）
   uninstall 卸载工具链并清理 shell 配置
   update    从 GitHub 更新 udev 自身，并同步本地源码
   setup     一键配置 gh 登录、云存储与 restic 本地仓库
@@ -568,6 +581,14 @@ tools 分组:
   node | go | python | cargo | all
   默认执行 node go python
 
+repos 选项:
+  --tool, -t <auto|jj|git|gh>  选择克隆工具，默认 auto（优先 jj）
+  --dir, -d <路径>             覆盖克隆根目录
+  --list, -l                   只列出仓库，不执行克隆/更新
+  --check, -c                  只检查远端更新，不修改工作副本
+  --jj | --git | --gh          快捷指定工具
+  也接受仓库名、owner/repo 或完整地址，只处理匹配项
+
 配置/存储目录:
   %s
   配置文件: %s
@@ -580,6 +601,10 @@ tools 分组:
   udev restore --force nvm
   udev tools node go
   udev tools all
+  udev repos
+  udev repos --check
+  udev repos --tool git
+  udev repos vaultwarden u-ani
   udev uninstall -y -k
   udev update
   udev setup
@@ -588,9 +613,10 @@ tools 分组:
 
 说明:
   - npm/go/pip/cargo 工具清单全部位于配置文件中，直接编辑即可自定义
+  - repos 的目录、工具与仓库清单同样在配置文件的 repos 段中修改
   - 环境变量可覆盖配置：UDEV_HOME、UDEV_BACKUP_DIR、PYENV_ROOT、NVM_DIR、
     GOPATH、RUSTUP_HOME、CARGO_HOME、FVM_CACHE_PATH、FVM_INSTALL_DIR、
-    USE_CN_MIRROR=1
+    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、USE_CN_MIRROR=1
 `, u.Bold("udev"), Version, "~/.udev", "~/.udev/config.yaml")
 	fmt.Fprint(u.Out, help)
 }

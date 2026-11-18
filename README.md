@@ -34,6 +34,7 @@ install -m 755 udev.sh ~/.local/bin/udev    # 或安装到 PATH 后直接 udev
 udev install --cn pyenv g nvm
 udev backup all
 udev tools node go
+udev repos
 udev uninstall -y -k
 ```
 
@@ -134,6 +135,13 @@ udev tools                   # 默认 node go python
 udev tools node go
 udev tools all
 
+# 一键批量克隆/更新仓库（优先 jj，其次 git、gh）
+udev repos
+udev repos --list            # 只查看将处理的仓库
+udev repos --check           # 检查哪些仓库有远端更新
+udev repos --tool git        # 强制使用 git
+udev repos vaultwarden u-ani # 只处理匹配的仓库
+
 # 卸载
 udev uninstall -y -k         # 跳过确认，保留 GOPATH
 udev uninstall -y pyenv nvm
@@ -232,6 +240,67 @@ storage:
 - restic 默认创建在本地目录，使用前可执行 `source ~/.udev/restic/udev.env`
 - `udev.sh` 纯 Bash 版暂不包含 `update`、`setup` 与源码同步功能
 
+## 批量克隆/更新仓库
+
+`udev repos` 会按配置中的清单逐个处理：目录不存在时克隆，已存在时更新，默认克隆到 `~/.udev/git`。执行时会自动检测 `jj`、`git`、`gh` 是否存在，默认优先使用 `jj`；更新时按仓库自身类型选择 `jj git fetch` 或 `git pull --ff-only`。
+
+默认清单：
+
+```text
+dani-garcia/vaultwarden
+h4ckf0r0day/obscura
+localsend/localsend
+HanamiSakiP/u-ani
+HanamiSakiP/u-comic
+HanamiSakiP/u-game
+HanamiSakiP/udev
+```
+
+在 `~/.udev/config.yaml` 中修改目录、工具与清单，直接在 `list` 下新增仓库即可。已有配置文件缺少 `repos` 段时，运行任意 `udev` 命令会自动把默认仓库清单追加进去：
+
+```yaml
+repos:
+  dir: ~/.udev/git        # 克隆根目录，默认 ~/.udev/git
+  tool: auto              # auto | jj | git | gh，auto 时优先 jj
+  protocol: https         # https | ssh
+  list:
+    - dani-garcia/vaultwarden
+    - h4ckf0r0day/obscura
+    - localsend/localsend
+    - HanamiSakiP/u-ani
+    - HanamiSakiP/u-comic
+    - HanamiSakiP/u-game
+    - HanamiSakiP/udev
+    # 追加新仓库只需加一行
+    - owner/new-repo
+    # 也支持完整地址或自带主机名
+    - https://gitlab.com/owner/repo.git
+    - gitlab.com/owner/repo
+```
+
+常用用法：
+
+```bash
+udev repos                     # 一键克隆/更新全部
+udev repos --list              # 只列出，不执行
+udev repos --check             # 检查哪些仓库有远端更新
+udev repos --jj                # 强制 jj 克隆
+udev repos --tool git          # 强制 git
+udev repos --dir ~/code        # 临时更换目录
+udev repos vaultwarden u-ani   # 只处理匹配的仓库
+udev repos someone/newrepo     # 清单外的仓库也可临时克隆
+```
+
+说明：
+
+- `--list` 只读本地目录状态；`--check` 会访问远端检查是否有更新
+- `--check`：git 仓库使用 `git fetch --dry-run`，不改动任何引用；jj 仓库使用 `jj git fetch` 更新远端 bookmark，但不修改工作副本
+- 未克隆的仓库在 `--check` 时只报告“未克隆”，不会自动克隆
+- `--jj`、`--git`、`--gh` 是 `--tool` 的快捷写法
+- `jj` 仓库更新只执行 `jj git fetch`，不会自动改动工作副本
+- `git` 仓库使用 `git pull --ff-only`，存在本地分叉时会报错而不会合并
+- 环境变量 `UDEV_REPOS_DIR`、`UDEV_REPOS_TOOL` 可覆盖配置
+
 ## 自定义工具清单
 
 所有下载/安装项都在 `~/.udev/config.yaml` 的 `dev_tools` 下，直接编辑即可，无需重新编译：
@@ -297,6 +366,7 @@ dev_tools:     # 开发工具清单
 uninstall:     # 卸载行为（是否默认删除 GOPATH）
 storage:       # 云存储、凭据、restic 仓库与源码目录
 update:        # 自更新来源（GitHub repo / branch）
+repos:         # 批量克隆/更新仓库的目录、工具与清单
 ```
 
 常用环境变量（优先级高于配置文件）：
@@ -305,6 +375,7 @@ update:        # 自更新来源（GitHub repo / branch）
 - `UDEV_BACKUP_DIR`：备份目录
 - `PYENV_ROOT`、`NVM_DIR`、`GOPATH`、`RUSTUP_HOME`、`CARGO_HOME`
 - `FVM_CACHE_PATH`、`FVM_INSTALL_DIR`
+- `UDEV_REPOS_DIR`、`UDEV_REPOS_TOOL`
 - `USE_CN_MIRROR=1` 或 `UDEV_USE_CN=1`
 - `CN_GITHUB_PROXY`、`CN_NODE_MIRROR`、`CN_GO_MIRROR`、`CN_PYTHON_MIRROR`
 

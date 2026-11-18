@@ -5,7 +5,7 @@
 # 只依赖 bash / tar / 常见 Unix 工具；下载需要 curl 或 wget。
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
   echo "udev 需要 bash 4.3 或更高版本（当前: ${BASH_VERSION:-unknown}）" >&2
@@ -243,6 +243,16 @@ dev_tools:
   go:
     g_version: latest
     packages:
+      - path: github.com/asdf-vm/asdf/cmd/asdf@latest
+        bin: asdf
+      - path: github.com/HanamiSakiP/u-ani/cmd/uani@latest
+        bin: uani
+      - path: github.com/HanamiSakiP/u-comic/cmd/ucom@latest
+        bin: ucom
+      - path: github.com/HanamiSakiP/u-game/cmd/ugal@latest
+        bin: ugal
+      - path: github.com/jesseduffield/lazydocker@latest
+        bin: lazydocker
       - path: github.com/restic/restic/cmd/restic@latest
         bin: restic
       - path: github.com/rclone/rclone@latest
@@ -320,6 +330,18 @@ dev_tools:
       - rm -rf ~/.cargo/git ~/.cargo/registry
 uninstall:
   include_gopath: true
+repos:
+  dir: $HOME_DIR/git
+  tool: auto
+  protocol: https
+  list:
+    - dani-garcia/vaultwarden
+    - h4ckf0r0day/obscura
+    - localsend/localsend
+    - HanamiSakiP/u-ani
+    - HanamiSakiP/u-comic
+    - HanamiSakiP/u-game
+    - HanamiSakiP/udev
 EOF
 }
 
@@ -405,6 +427,8 @@ apply_env() {
   _env_pick mirror.node CN_NODE_MIRROR
   _env_pick mirror.go CN_GO_MIRROR
   _env_pick mirror.python CN_PYTHON_MIRROR
+  _env_pick repos.dir UDEV_REPOS_DIR
+  _env_pick repos.tool UDEV_REPOS_TOOL
   if [[ -n ${UDEV_USE_CN-} ]]; then
     _CFG[mirror.use_cn]=$UDEV_USE_CN
   elif [[ -n ${USE_CN_MIRROR-} ]]; then
@@ -425,7 +449,18 @@ init_paths() {
   FVM_INSTALL=$(expand_path "$(cfg_key paths.fvm_install)")
 
   SHELL_FILES=()
-  local n i
+  local n i repos_raw
+  repos_raw=$(cfg_key repos.dir)
+  if [[ -n $repos_raw ]]; then
+    REPOS_DIR=$(expand_path "$repos_raw")
+  else
+    REPOS_DIR="$HOME_DIR/git"
+  fi
+  REPOS_TOOL=$(cfg_key repos.tool)
+  REPOS_TOOL=${REPOS_TOOL:-auto}
+  REPOS_PROTOCOL=$(cfg_key repos.protocol)
+  REPOS_PROTOCOL=${REPOS_PROTOCOL:-https}
+
   n=$(seq_len shell.files)
   for ((i = 0; i < n; i++)); do
     SHELL_FILES+=("$(expand_path "$(cfg_key "shell.files[$i]")")")
@@ -455,12 +490,129 @@ load_config() {
   init_paths
 }
 
+ensure_repos_section() {
+  [[ -f $CONFIG_FILE ]] || return 0
+  grep -qE '^repos:' "$CONFIG_FILE" && return 0
+  local n i spec
+  n=$(seq_len repos.list)
+  {
+    printf '\n# 仓库清单（默认值，可按需增删）\n'
+    printf 'repos:\n'
+    printf '  dir: %s/git\n' "$HOME_DIR"
+    printf '  tool: auto\n'
+    printf '  protocol: https\n'
+    printf '  list:\n'
+    for ((i = 0; i < n; i++)); do
+      spec=$(cfg_key "repos.list[$i]")
+      [[ -n $spec ]] && printf '    - %s\n' "$spec"
+    done
+  } >>"$CONFIG_FILE" || return 1
+  info "已写入默认仓库清单: $CONFIG_FILE"
+}
+
+ensure_go_packages() {
+  [[ -f $CONFIG_FILE ]] || return 0
+  local dn un i j pkg bin exists upath
+  local -a mpath=() mbin=()
+  dn=${_DSEQ[dev_tools.go.packages]:-0}
+  un=$(seq_len dev_tools.go.packages)
+  for ((i = 0; i < dn; i++)); do
+    pkg=${_DEF["dev_tools.go.packages[$i].path"]-}
+    [[ -n $pkg ]] || pkg=${_DEF["dev_tools.go.packages[$i]"]-}
+    [[ -n $pkg ]] || continue
+    bin=${_DEF["dev_tools.go.packages[$i].bin"]-}
+    exists=0
+    for ((j = 0; j < un; j++)); do
+      upath=${_CFG["dev_tools.go.packages[$j].path"]-}
+      [[ -n $upath ]] || upath=${_CFG["dev_tools.go.packages[$j]"]-}
+      if [[ $upath == "$pkg" ]]; then
+        exists=1
+        break
+      fi
+    done
+    ((exists)) && continue
+    mpath+=("$pkg")
+    mbin+=("$bin")
+  done
+  ((${#mpath[@]})) || return 0
+
+  local spec tmp ok=0
+  spec=$(mktemp "${TMPDIR:-/tmp}/udev-gopkgs-XXXXXX") || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/udev-config-XXXXXX") || {
+    rm -f "$spec"
+    return 1
+  }
+  for i in "${!mpath[@]}"; do
+    printf '%s\t%s\n' "${mpath[i]}" "${mbin[i]}" >>"$spec"
+  done
+  if awk -v specfile="$spec" '
+    BEGIN {
+      while ((getline l < specfile) > 0) {
+        if (l == "") continue
+        n++; split(l, a, "\t"); mp[n] = a[1]; mb[n] = a[2]
+      }
+      close(specfile)
+    }
+    { line[NR] = $0 }
+    END {
+      di = 0
+      for (i = 1; i <= NR; i++) if (line[i] ~ /^dev_tools:[ \t]*$/) { di = i; break }
+      if (!di) exit 1
+      gi = 0
+      for (i = di + 1; i <= NR; i++) {
+        if (line[i] ~ /^[ \t]*$/) continue
+        if (line[i] ~ /^[^ \t]/) break
+        if (line[i] ~ /^[ \t]+go:[ \t]*$/) { gi = i; break }
+      }
+      if (!gi) exit 2
+      match(line[gi], /[^ \t]/); gind = RSTART - 1
+      pi = 0
+      for (i = gi + 1; i <= NR; i++) {
+        if (line[i] ~ /^[ \t]*$/) continue
+        match(line[i], /[^ \t]/); ind = RSTART - 1
+        if (ind <= gind) break
+        if (line[i] ~ /^[ \t]+packages:[ \t]*$/) { pi = i; break }
+      }
+      if (!pi) exit 3
+      match(line[pi], /[^ \t]/); pind = RSTART - 1
+      iind = pind + 2
+      for (i = pi + 1; i <= NR; i++) {
+        if (line[i] ~ /^[ \t]*$/) continue
+        match(line[i], /[^ \t]/); ind = RSTART - 1
+        if (ind <= pind) break
+        if (line[i] ~ /^[ \t]+-/) { iind = ind; break }
+      }
+      pad = sprintf("%*s", iind, "")
+      for (i = 1; i <= NR; i++) {
+        print line[i]
+        if (i == pi) {
+          for (k = 1; k <= n; k++) {
+            printf "%s- path: %s\n", pad, mp[k]
+            printf "%s  bin: %s\n", pad, mb[k]
+          }
+        }
+      }
+    }
+  ' "$CONFIG_FILE" >"$tmp"; then
+    cat "$tmp" >"$CONFIG_FILE" && ok=1
+  fi
+  rm -f "$spec" "$tmp"
+  ((ok)) || return 1
+
+  _CFG=() _SEQ=()
+  load_yaml "$CONFIG_FILE" _CFG _SEQ
+  info "已写入默认 go 工具: $CONFIG_FILE"
+}
+
 ensure_config() {
   mkdir -p "$HOME_DIR" || { err "无法创建配置目录: $HOME_DIR"; return 1; }
   mkdir -p "$BACKUP_DIR" || { err "无法创建备份目录: $BACKUP_DIR"; return 1; }
   if [[ ! -f $CONFIG_FILE ]]; then
     default_config >"$CONFIG_FILE" || return 1
     info "已生成默认配置: $CONFIG_FILE"
+  else
+    ensure_go_packages || return 1
+    ensure_repos_section || return 1
   fi
 }
 
@@ -1542,6 +1694,381 @@ tool_clean() {
 }
 
 # ---------------------------------------------------------------------------
+# 命令：repos 批量克隆/更新仓库
+# ---------------------------------------------------------------------------
+
+repo_name() {
+  local s=$1
+  s=${s%/}
+  s=${s%.git}
+  s=${s##*[/:]}
+  [[ -n $s ]] || s=repo
+  printf '%s' "$s"
+}
+
+repo_url() {
+  local spec=$1 proto=${2:-https} host rest
+  if [[ $spec == *://* || $spec == git@* ]]; then
+    printf '%s' "$spec"
+    return 0
+  fi
+  spec=${spec%/}
+  spec=${spec%.git}
+  if [[ $spec == */*/* ]]; then
+    host=${spec%%/*}
+    rest=${spec#*/}
+    if [[ $host == *.* ]]; then
+      if [[ $proto == ssh ]]; then
+        printf 'git@%s:%s.git' "$host" "$rest"
+      else
+        printf 'https://%s/%s.git' "$host" "$rest"
+      fi
+      return 0
+    fi
+  fi
+  if [[ $proto == ssh ]]; then
+    printf 'git@github.com:%s.git' "$spec"
+  else
+    printf 'https://github.com/%s.git' "$spec"
+  fi
+}
+
+looks_like_repo() {
+  local s=$1
+  [[ $s == *://* || $s == git@* || ( $s == */* && $s != /* ) ]]
+}
+
+detect_repo_tool() {
+  local pref=${1:-auto} t
+  pref=${pref,,}
+  case $pref in
+    auto)
+      for t in jj git gh; do
+        if command -v "$t" >/dev/null 2>&1; then
+          printf '%s' "$t"
+          return 0
+        fi
+      done
+      err "未找到 jj、git 或 gh，请先安装其中之一"
+      return 1
+      ;;
+    jj | git | gh)
+      if command -v "$pref" >/dev/null 2>&1; then
+        printf '%s' "$pref"
+        return 0
+      fi
+      err "未找到 $pref，请先安装或改用其他工具"
+      return 1
+      ;;
+    *)
+      err "不支持的工具: $pref（可选: auto jj git gh）"
+      return 1
+      ;;
+  esac
+}
+
+is_repo_dir() {
+  [[ -d $1/.jj || -e $1/.git ]]
+}
+
+clone_repo() { # spec url dest tool
+  local spec=$1 url=$2 dest=$3 tool=$4 src
+  case $tool in
+    jj) jj git clone "$url" "$dest" ;;
+    git) git clone "$url" "$dest" ;;
+    gh)
+      src=$spec
+      if [[ $src == *://* || $src == git@* || $src == *.*/* ]]; then
+        src=$url
+      fi
+      gh repo clone "$src" "$dest"
+      ;;
+  esac
+}
+
+update_repo() { # dest
+  local dest=$1
+  if [[ -d $dest/.jj ]]; then
+    command -v jj >/dev/null 2>&1 || {
+      err "仓库使用 jj，但未找到 jj"
+      return 1
+    }
+    (cd "$dest" && jj git fetch)
+  elif [[ -e $dest/.git ]]; then
+    command -v git >/dev/null 2>&1 || {
+      err "仓库使用 git，但未找到 git"
+      return 1
+    }
+    (cd "$dest" && git pull --ff-only)
+  else
+    err "目标目录不是 git/jj 仓库: $dest"
+    return 1
+  fi
+}
+
+jj_remote_snapshot() { # dest
+  jj -R "$1" bookmark list --all-remotes \
+    -T 'name ++ " " ++ remote ++ " " ++ normal_target.commit_id() ++ "\n"' 2>&1 | sort
+}
+
+check_repo() { # dest
+  local dest=$1 before after out rc
+  if [[ -d $dest/.jj ]]; then
+    command -v jj >/dev/null 2>&1 || {
+      err "仓库使用 jj，但未找到 jj"
+      return 1
+    }
+    before=$(jj_remote_snapshot "$dest")
+    rc=$?
+    if ((rc != 0)); then
+      printf '%s\n' "$before" >&2
+      return 1
+    fi
+    out=$(cd "$dest" && jj git fetch 2>&1)
+    rc=$?
+    if ((rc != 0)); then
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+    after=$(jj_remote_snapshot "$dest")
+    rc=$?
+    if ((rc != 0)); then
+      printf '%s\n' "$after" >&2
+      return 1
+    fi
+    [[ $before == "$after" ]] && return 0
+    return 10
+  elif [[ -e $dest/.git ]]; then
+    command -v git >/dev/null 2>&1 || {
+      err "仓库使用 git，但未找到 git"
+      return 1
+    }
+    out=$(cd "$dest" && git fetch --dry-run 2>&1)
+    rc=$?
+    if ((rc != 0)); then
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+    [[ -z ${out//[[:space:]]/} ]] && return 0
+    return 10
+  fi
+  err "目标目录不是 git/jj 仓库: $dest"
+  return 1
+}
+
+cmd_repos() {
+  local tool="" dir="" list_only=0 check_only=0 protocol a i n spec arg lower matched rn rs state
+  local rspec rurl rname rdest up_to_date=0 updates=0 missing=0 rc=0
+  local -a args=() specs=() urls=() names=() dests=() failed=() missing_args=()
+
+  while (($#)); do
+    a=$1
+    shift
+    case $a in
+      -h | --help)
+        print_help
+        return 0
+        ;;
+      --list | -l) list_only=1 ;;
+      --check | -c) check_only=1 ;;
+      --jj) tool=jj ;;
+      --git) tool=git ;;
+      --gh) tool=gh ;;
+      --tool | -t)
+        if (($#)); then
+          tool=$1
+          shift
+        else
+          err "$a 需要一个值（auto|jj|git|gh）"
+          return 1
+        fi
+        ;;
+      --tool=*) tool=${a#*=} ;;
+      --dir | -d)
+        if (($#)); then
+          dir=$1
+          shift
+        else
+          err "$a 需要一个目录"
+          return 1
+        fi
+        ;;
+      --dir=*) dir=${a#*=} ;;
+      -*)
+        err "未知参数: $a"
+        return 1
+        ;;
+      *) args+=("$a") ;;
+    esac
+  done
+
+  [[ -n $tool ]] || tool=$REPOS_TOOL
+  [[ -n $tool ]] || tool=auto
+
+  if [[ -n $dir ]]; then
+    dir=$(expand_path "$dir")
+  else
+    dir=$REPOS_DIR
+  fi
+  protocol=${REPOS_PROTOCOL:-https}
+
+  # 添加仓库并去重（利用调用方的动态作用域写入数组）
+  _repos_add() {
+    local s=$1 x n d u
+    n=$(repo_name "$s")
+    d="$dir/$n"
+    for x in "${dests[@]}"; do
+      [[ $x == "$d" ]] && return 0
+    done
+    u=$(repo_url "$s" "$protocol")
+    specs+=("$s")
+    urls+=("$u")
+    names+=("$n")
+    dests+=("$d")
+  }
+
+  if ((${#args[@]} == 0)); then
+    n=$(seq_len repos.list)
+    for ((i = 0; i < n; i++)); do
+      spec=$(cfg_key "repos.list[$i]")
+      [[ -n $spec ]] && _repos_add "$spec"
+    done
+  else
+    for arg in "${args[@]}"; do
+      matched=0
+      lower=${arg,,}
+      n=$(seq_len repos.list)
+      for ((i = 0; i < n; i++)); do
+        spec=$(cfg_key "repos.list[$i]")
+        [[ -n $spec ]] || continue
+        rn=$(repo_name "$spec")
+        rs=${spec,,}
+        if [[ ${rn,,} == "$lower" || $rs == "$lower" || $rs == *"$lower"* ]]; then
+          _repos_add "$spec"
+          matched=1
+        fi
+      done
+      if ((matched)); then
+        continue
+      fi
+      if looks_like_repo "$arg"; then
+        _repos_add "$arg"
+      else
+        missing_args+=("$arg")
+      fi
+    done
+    if ((${#missing_args[@]})); then
+      err "配置中没有匹配的仓库: ${missing_args[*]}（可写完整 owner/repo 或地址）"
+      return 1
+    fi
+  fi
+
+  if ((${#specs[@]} == 0)); then
+    err "没有需要处理的仓库"
+    return 1
+  fi
+
+  header "udev repos"
+  info "仓库目录: $dir"
+  info "仓库数量: ${#specs[@]}"
+
+  if ((list_only)); then
+    info "使用工具: $tool（配置值，执行时会自动检测 jj/git/gh）"
+    printf '\n'
+    for ((i = 0; i < ${#specs[@]}; i++)); do
+      rname=${names[i]}
+      rdest=${dests[i]}
+      rurl=${urls[i]}
+      if is_repo_dir "$rdest"; then
+        state=已存在
+      else
+        state=待克隆
+      fi
+      printf '  %-28s %-8s %s\n' "$rname" "$state" "$(dim "$rurl")"
+      printf '  %-28s %-8s %s\n' "" "" "$(dim "$rdest")"
+    done
+    return 0
+  fi
+
+  if ((check_only)); then
+    info "模式: 检查更新（git 使用 fetch --dry-run，jj 会 fetch 远端状态，不修改工作副本）"
+    for ((i = 0; i < ${#specs[@]}; i++)); do
+      rname=${names[i]}
+      rdest=${dests[i]}
+      printf '\n%s ==> [%d/%d] %s\n' "$(bold '')" "$((i + 1))" "${#specs[@]}" "$rname"
+      if ! is_repo_dir "$rdest"; then
+        info "$rname 未克隆: $rdest"
+        missing=$((missing + 1))
+        continue
+      fi
+      if check_repo "$rdest"; then
+        ok "$rname 已是最新"
+        up_to_date=$((up_to_date + 1))
+      else
+        rc=$?
+        if ((rc == 10)); then
+          warn "$rname 有可用更新"
+          updates=$((updates + 1))
+        else
+          err "$rname 检查失败"
+          failed+=("$rname")
+        fi
+      fi
+    done
+    printf '\n'
+    info "检查完成: 已最新 $up_to_date，有更新 $updates，未克隆 $missing"
+    ((updates > 0)) && info "执行 udev repos 即可更新"
+    if ((${#failed[@]})); then
+      err "以下仓库检查失败: ${failed[*]}"
+      return 1
+    fi
+    return 0
+  fi
+
+  tool=$(detect_repo_tool "$tool") || return 1
+  info "使用工具: $tool（可用 jj、git、gh，优先 jj）"
+
+  mkdir -p "$dir" || {
+    err "创建仓库目录失败: $dir"
+    return 1
+  }
+
+  for ((i = 0; i < ${#specs[@]}; i++)); do
+    rspec=${specs[i]}
+    rurl=${urls[i]}
+    rname=${names[i]}
+    rdest=${dests[i]}
+    printf '\n%s ==> [%d/%d] %s\n' "$(bold '')" "$((i + 1))" "${#specs[@]}" "$rname"
+    if is_repo_dir "$rdest"; then
+      subst "更新已有仓库: $rdest"
+      if ! update_repo "$rdest"; then
+        failed+=("$rname")
+      fi
+      continue
+    fi
+    if [[ -e $rdest ]]; then
+      err "$rname 目标目录已存在但不是 git/jj 仓库: $rdest"
+      failed+=("$rname")
+      continue
+    fi
+    subst "克隆 $rurl"
+    if ! clone_repo "$rspec" "$rurl" "$rdest" "$tool"; then
+      err "$rname 克隆失败"
+      failed+=("$rname")
+      continue
+    fi
+    ok "$rname 已克隆到 $rdest"
+  done
+
+  printf '\n'
+  if ((${#failed[@]})); then
+    err "以下仓库处理失败: ${failed[*]}"
+    return 1
+  fi
+  ok "=== 仓库全部就绪 ==="
+}
+
+# ---------------------------------------------------------------------------
 # 命令：install / backup / restore / status / list / config
 # ---------------------------------------------------------------------------
 
@@ -1782,6 +2309,11 @@ cmd_status() {
   printf '  go     : go install %d 个\n' "$(seq_len dev_tools.go.packages)"
   printf '  python : pip %d 个\n' "$(seq_len dev_tools.python.packages)"
   printf '  cargo  : %d 个\n' "$(seq_len dev_tools.cargo.packages)"
+
+  printf '\n%s\n' "$(bold '仓库清单')"
+  printf '  目录   : %s\n' "$REPOS_DIR"
+  printf '  工具   : %s（auto 时优先 jj）\n' "$REPOS_TOOL"
+  printf '  数量   : %d 个\n' "$(seq_len repos.list)"
 
   printf '\n配置目录: %s\n' "$HOME_DIR"
   printf '配置文件: %s\n' "$CONFIG_FILE"
@@ -2647,7 +3179,7 @@ comp_words() {
   for w in "${used[@]}"; do
     [[ $w == -* ]] && continue
     case $w in
-      install | i | backup | b | restore | r | recover | status | st | s | list | ls | l | tools | dev | dev-tool | uninstall | remove | rm | config | cfg | completion) sub=$w ;;
+      install | i | backup | b | restore | r | recover | status | st | s | list | ls | l | tools | dev | dev-tool | repos | repo | clone | uninstall | remove | rm | config | cfg | completion) sub=$w ;;
     esac
     break
   done
@@ -2659,16 +3191,27 @@ comp_words() {
   local -a install_flags=(--cn -c --force -f --no-restore --no-modify-path --help -h)
   local -a restore_flags=(--force -f --help -h)
   local -a uninstall_flags=(-y --yes -k --keep-gopath --help -h)
+  local -a repos_flags=(--tool -t --dir -d --list -l --check -c --jj --git --gh --help -h)
 
   case $sub in
     "")
-      cands=(install backup restore status list tools uninstall config completion version help --help --version -h -v)
+      cands=(install backup restore status list tools repos uninstall config completion version help --help --version -h -v)
       ;;
     install | i) cands=("${tools[@]}" "${install_flags[@]}") ;;
     backup | b | list | ls | l) cands=("${tools[@]}" --help -h) ;;
     restore | r | recover) cands=("${tools[@]}" "${restore_flags[@]}") ;;
     uninstall | remove | rm) cands=("${tools[@]}" "${uninstall_flags[@]}") ;;
     tools | dev | dev-tool) cands=("${sections[@]}" --help -h) ;;
+    repos | repo | clone)
+      cands=("${repos_flags[@]}")
+      if ((${#_CFG[@]} == 0)); then load_config >/dev/null 2>&1 || true; fi
+      local rn_n rn_i rn_spec
+      rn_n=$(seq_len repos.list)
+      for ((rn_i = 0; rn_i < rn_n; rn_i++)); do
+        rn_spec=$(cfg_key "repos.list[$rn_i]")
+        [[ -n $rn_spec ]] && cands+=("$(repo_name "$rn_spec")")
+      done
+      ;;
     config | cfg)
       if ((${#used[@]} >= 2)) && [[ ${used[1]} != -* ]]; then
         if [[ ${used[1]} == init ]]; then
@@ -2688,7 +3231,7 @@ comp_words() {
       fi
       ;;
     status | st | s | version | help) cands=(--help -h) ;;
-    *) cands=(install backup restore status list tools uninstall config completion version help --help --version -h -v) ;;
+    *) cands=(install backup restore status list tools repos uninstall config completion version help --help --version -h -v) ;;
   esac
 
   for c in "${cands[@]}"; do
@@ -2708,7 +3251,7 @@ print_help() {
   cat <<EOF
 $(bold udev) v$VERSION - 一体化开发工具管理器（纯 Bash 版，无需 Go）
 
-用法: udev <命令> [选项] [工具/分组...]
+用法: udev <命令> [选项] [工具/分组/仓库...]
 
 命令:
   install   安装工具（优先本地备份恢复，否则在线安装）
@@ -2717,6 +3260,7 @@ $(bold udev) v$VERSION - 一体化开发工具管理器（纯 Bash 版，无需 
   status    查看工具安装状态、版本与备份数量
   list      列出可用备份
   tools     按配置文件批量安装开发工具
+  repos     一键批量克隆/更新配置中的仓库（优先 jj）
   uninstall 卸载工具链并清理 shell 配置
   config    查看/编辑配置（show | path | init | edit）
   completion 生成或安装 shell Tab 补全（bash | zsh | fish | install）
@@ -2743,6 +3287,14 @@ tools 分组:
   node | go | python | cargo | all
   默认执行 node go python
 
+repos 选项:
+  --tool, -t <auto|jj|git|gh>  选择克隆工具，默认 auto（优先 jj）
+  --dir, -d <路径>             覆盖克隆根目录
+  --list, -l                   只列出仓库，不执行克隆/更新
+  --check, -c                  只检查远端更新，不修改工作副本
+  --jj | --git | --gh          快捷指定工具
+  也接受仓库名、owner/repo 或完整地址，只处理匹配项
+
 配置/存储目录:
   ${HOME_DIR:-$HOME/.udev}
   配置文件: ${CONFIG_FILE:-$HOME/.udev/config.yaml}
@@ -2755,15 +3307,20 @@ tools 分组:
   udev restore --force nvm
   udev tools node go
   udev tools all
+  udev repos
+  udev repos --check
+  udev repos --tool git
+  udev repos vaultwarden u-ani
   udev uninstall -y -k
   udev config edit
 
 说明:
   - 与 Go 版共用同一份 config.yaml 与备份目录，可交替使用
   - npm/go/pip/cargo 工具清单全部位于配置文件中，直接编辑即可自定义
+  - repos 的目录、工具与仓库清单同样在配置文件的 repos 段中修改
   - 环境变量可覆盖配置：UDEV_HOME、UDEV_BACKUP_DIR、PYENV_ROOT、NVM_DIR、
     GOPATH、RUSTUP_HOME、CARGO_HOME、FVM_CACHE_PATH、FVM_INSTALL_DIR、
-    USE_CN_MIRROR=1
+    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、USE_CN_MIRROR=1
   - 依赖：bash 4.3+、tar、git；下载需要 curl 或 wget
 EOF
 }
@@ -2816,6 +3373,10 @@ main() {
     tools | dev | dev-tool)
       shift
       cmd_tools "$@"
+      ;;
+    repos | repo | clone)
+      shift
+      cmd_repos "$@"
       ;;
     uninstall | remove | rm)
       shift
