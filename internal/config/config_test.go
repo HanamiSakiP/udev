@@ -40,6 +40,63 @@ func TestDefaultsRoundTrip(t *testing.T) {
 	if c.Repos.Dir != d.Repos.Dir {
 		t.Fatalf("repos dir = %q, want %q", c.Repos.Dir, d.Repos.Dir)
 	}
+	if len(c.Releases.List) != len(d.Releases.List) {
+		t.Fatalf("releases list mismatch")
+	}
+	if c.Releases.List[0].Repo != "iina/iina" || c.Releases.List[0].Pattern != "IINA.v*.dmg" {
+		t.Fatalf("releases first = %+v", c.Releases.List[0])
+	}
+	if c.Releases.Tool != "auto" {
+		t.Fatalf("releases tool = %q", c.Releases.Tool)
+	}
+	if c.Releases.Dir != "/tmp/udev/git/release" {
+		t.Fatalf("releases dir = %q, want /tmp/udev/git/release", c.Releases.Dir)
+	}
+}
+
+func TestEnsureReleasesSectionAppendsDefaults(t *testing.T) {
+	home := t.TempDir()
+	cfg := Defaults(home)
+	cfg.Home = home
+	cfg.File = filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(cfg.File, []byte("mirror:\n  use_cn: false\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	added, err := cfg.EnsureReleasesSection()
+	if err != nil {
+		t.Fatalf("ensure releases: %v", err)
+	}
+	if !added {
+		t.Fatal("expected releases section to be appended")
+	}
+
+	data, err := os.ReadFile(cfg.File)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "releases:") {
+		t.Fatalf("releases section missing:\n%s", data)
+	}
+
+	var parsed Config
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse appended config: %v", err)
+	}
+	if len(parsed.Releases.List) != len(cfg.Releases.List) {
+		t.Fatalf("releases count = %d, want %d", len(parsed.Releases.List), len(cfg.Releases.List))
+	}
+	if parsed.Releases.List[1].Pattern != "Highball.dmg" {
+		t.Fatalf("releases second = %+v", parsed.Releases.List[1])
+	}
+
+	added, err = cfg.EnsureReleasesSection()
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if added {
+		t.Fatal("expected second call to be a no-op")
+	}
 }
 
 func TestEnsureReposSectionAppendsDefaults(t *testing.T) {

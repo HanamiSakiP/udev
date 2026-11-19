@@ -24,6 +24,7 @@ type Config struct {
 	Storage   StorageConfig   `yaml:"storage"`
 	Update    UpdateConfig    `yaml:"update"`
 	Repos     ReposConfig     `yaml:"repos"`
+	Releases  ReleasesConfig  `yaml:"releases"`
 }
 
 // MirrorConfig 镜像相关配置。
@@ -114,6 +115,29 @@ func DefaultRepoList() []string {
 		"HanamiSakiP/u-comic",
 		"HanamiSakiP/u-game",
 		"HanamiSakiP/udev",
+	}
+}
+
+// ReleasesConfig 一键下载 GitHub Release 文件的配置。
+type ReleasesConfig struct {
+	Dir  string        `yaml:"dir"`  // 下载目录，默认 <home>/git/release
+	Tool string        `yaml:"tool"` // auto | gh | api，默认 auto（gh 已登录时优先 gh）
+	List []ReleaseItem `yaml:"list"`
+}
+
+// ReleaseItem 一个待下载的 Release 文件。
+type ReleaseItem struct {
+	Repo    string `yaml:"repo"`          // owner/repo
+	Pattern string `yaml:"pattern"`       // 文件名通配符，例如 "*.dmg"
+	Tag     string `yaml:"tag,omitempty"` // 为空表示最新 Release
+}
+
+// DefaultReleaseList 返回默认需要下载的 Release 文件清单。
+func DefaultReleaseList() []ReleaseItem {
+	return []ReleaseItem{
+		{Repo: "iina/iina", Pattern: "IINA.v*.dmg"},
+		{Repo: "gauthierpiarrette/highball", Pattern: "Highball.dmg"},
+		{Repo: "shinchiro/mpv-winbuild-cmake", Pattern: "*mpv-x86_64-v3-*.7z"},
 	}
 }
 
@@ -389,6 +413,11 @@ func Defaults(home string) *Config {
 			Protocol: "https",
 			List:     DefaultRepoList(),
 		},
+		Releases: ReleasesConfig{
+			Dir:  filepath.Join(home, "git", "release"),
+			Tool: "auto",
+			List: DefaultReleaseList(),
+		},
 	}
 	return c
 }
@@ -513,6 +542,12 @@ func (c *Config) fillEmpty(d *Config) {
 	if c.Repos.Protocol == "" {
 		c.Repos.Protocol = d.Repos.Protocol
 	}
+	if c.Releases.Tool == "" {
+		c.Releases.Tool = d.Releases.Tool
+	}
+	if strings.TrimSpace(c.Releases.Dir) == "" {
+		c.Releases.Dir = d.Releases.Dir
+	}
 }
 
 // Ensure 创建配置目录与默认配置文件，返回是否为本次新建。
@@ -528,6 +563,9 @@ func (c *Config) Ensure() (bool, error) {
 			return false, err
 		}
 		if _, err := c.EnsureReposSection(); err != nil {
+			return false, err
+		}
+		if _, err := c.EnsureReleasesSection(); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -660,6 +698,37 @@ func (c *Config) EnsureReposSection() (bool, error) {
 	return true, nil
 }
 
+// EnsureReleasesSection 检查配置文件中是否已有 releases 段，缺少时追加默认下载清单。
+// 返回是否写入了新内容。
+func (c *Config) EnsureReleasesSection() (bool, error) {
+	data, err := os.ReadFile(c.File)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if hasTopLevelKey(data, "releases") {
+		return false, nil
+	}
+	d := Defaults(c.Home)
+	block, err := yaml.Marshal(struct {
+		Releases ReleasesConfig `yaml:"releases"`
+	}{Releases: d.Releases})
+	if err != nil {
+		return false, err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, []byte("\n# Release 下载清单（默认值，可按需增删）\n")...)
+	data = append(data, block...)
+	if err := os.WriteFile(c.File, data, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func hasTopLevelKey(data []byte, key string) bool {
 	prefix := key + ":"
 	for _, line := range strings.Split(string(data), "\n") {
@@ -716,6 +785,7 @@ func (c *Config) Reset() error {
 	c.Storage = d.Storage
 	c.Update = d.Update
 	c.Repos = d.Repos
+	c.Releases = d.Releases
 	return c.Save()
 }
 
@@ -751,6 +821,8 @@ func (c *Config) applyEnv() {
 	set(&c.Mirror.Python, "CN_PYTHON_MIRROR")
 	set(&c.Repos.Dir, "UDEV_REPOS_DIR")
 	set(&c.Repos.Tool, "UDEV_REPOS_TOOL")
+	set(&c.Releases.Dir, "UDEV_RELEASES_DIR")
+	set(&c.Releases.Tool, "UDEV_RELEASES_TOOL")
 	if v := os.Getenv("UDEV_USE_CN"); v != "" {
 		c.Mirror.UseCN = truthy(v)
 	} else if v := os.Getenv("USE_CN_MIRROR"); v != "" {
@@ -773,6 +845,7 @@ func (c *Config) expand() {
 	c.Storage.RcloneConfig = expandPath(c.Storage.RcloneConfig)
 	c.Storage.SourceDir = expandPath(c.Storage.SourceDir)
 	c.Repos.Dir = expandPath(c.Repos.Dir)
+	c.Releases.Dir = expandPath(c.Releases.Dir)
 	for i := range c.Shell.Files {
 		c.Shell.Files[i] = expandPath(c.Shell.Files[i])
 	}

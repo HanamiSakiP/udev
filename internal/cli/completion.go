@@ -7,14 +7,15 @@ import (
 	"strings"
 
 	"github.com/hanamisakip/udev/internal/config"
+	"github.com/hanamisakip/udev/internal/releases"
 	"github.com/hanamisakip/udev/internal/repos"
 	"github.com/hanamisakip/udev/internal/ui"
 	"github.com/hanamisakip/udev/internal/util"
 )
 
 var topLevelCandidates = []string{
-	"install", "backup", "restore", "status", "list",
-	"tools", "repos", "uninstall", "update", "setup", "config", "completion", "version", "help",
+	"install", "backup", "restore", "status", "tui", "list",
+	"tools", "repos", "release", "uninstall", "update", "setup", "config", "completion", "version", "help",
 	"--help", "--version", "-h", "-v",
 }
 
@@ -38,6 +39,7 @@ var restoreFlags = []string{"--force", "-f", "--help", "-h"}
 var uninstallFlags = []string{"-y", "--yes", "-k", "--keep-gopath", "--help", "-h"}
 var toolsFlags = []string{"--help", "-h"}
 var reposFlags = []string{"--tool", "-t", "--dir", "-d", "--list", "-l", "--check", "-c", "--jj", "--git", "--gh", "--help", "-h"}
+var releaseFlags = []string{"--tool", "-t", "--dir", "-d", "--list", "-l", "--force", "-f", "--gh", "--api", "--help", "-h"}
 
 // completeWords 根据已输入内容返回候选列表。
 // words 的最后一个元素是当前正在补全的词（可能为空）。
@@ -72,6 +74,14 @@ func completeWords(words []string) []string {
 			}
 		}
 		return filterUsed(cands, used)
+	case "release", "releases", "dl", "download":
+		cands := append([]string{}, releaseFlags...)
+		if cfg, err := config.Load(); err == nil {
+			for _, item := range cfg.Releases.List {
+				cands = append(cands, releases.RepoName(item.Repo))
+			}
+		}
+		return filterUsed(cands, used)
 	case "config", "cfg":
 		if len(used) >= 2 && !strings.HasPrefix(used[1], "-") {
 			if used[1] == "init" {
@@ -92,7 +102,9 @@ func completeWords(words []string) []string {
 		return filterUsed(updateFlags, used)
 	case "setup", "init":
 		return filterUsed(setupCandidates, used)
-	case "status", "st", "s", "version", "help":
+	case "status", "st", "s", "tui", "dashboard":
+		return filterUsed([]string{"--help", "-h"}, used)
+	case "version", "help":
 		return filterUsed([]string{"--help", "-h"}, used)
 	}
 	return filterUsed(topLevelCandidates, used)
@@ -105,8 +117,8 @@ func findCommand(used []string) string {
 		}
 		switch w {
 		case "install", "i", "backup", "b", "restore", "r", "recover",
-			"status", "st", "s", "list", "ls", "l", "tools", "dev", "dev-tool",
-			"repos", "repo", "clone",
+			"status", "st", "s", "tui", "dashboard", "list", "ls", "l", "tools", "dev", "dev-tool",
+			"repos", "repo", "clone", "release", "releases", "dl", "download",
 			"uninstall", "remove", "rm", "config", "cfg", "completion",
 			"update", "upgrade", "up", "setup", "init":
 			return w

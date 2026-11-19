@@ -35,6 +35,7 @@ udev install --cn pyenv g nvm
 udev backup all
 udev tools node go
 udev repos
+udev release
 udev uninstall -y -k
 ```
 
@@ -64,6 +65,7 @@ mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/HanamiSaki
 - 需要 bash 4.3+（macOS 自带 3.2，可 `brew install bash` 后用 `bash udev.sh`），以及 GNU tar
 - `config show` 直接打印配置文件原文；Go 版输出的是与默认值合并后的结果
 - 未安装 `curl` 时会自动回退到 `wget`
+- 交互式界面 `udev tui` 仅 Go 版提供
 - 备份文件、目录布局、shell 配置规则与 Go 版一致，两个版本可以互相恢复
 
 ## Tab 补全
@@ -121,6 +123,9 @@ udev config init -f  # 重置为默认配置
 ## 常用命令
 
 ```bash
+# 交互式仪表盘
+udev tui
+
 # 版本管理器：pyenv / g / nvm / rust / fvm
 udev status
 udev install                 # 安装全部（默认 all）
@@ -142,6 +147,12 @@ udev repos --check           # 检查哪些仓库有远端更新
 udev repos --tool git        # 强制使用 git
 udev repos vaultwarden u-ani # 只处理匹配的仓库
 
+# 一键下载 GitHub Release 文件（gh 已登录时优先 gh）
+udev release
+udev release --list          # 只查看将下载的文件
+udev release --dir ~/Downloads iina
+udev release someone/repo#*.zip
+
 # 卸载
 udev uninstall -y -k         # 跳过确认，保留 GOPATH
 udev uninstall -y pyenv nvm
@@ -160,6 +171,38 @@ udev setup status            # 查看配置状态
 ```
 
 `udev install` 会先检查是否已安装，已安装则跳过；随后优先尝试从最新备份恢复，没有备份才在线安装。`--force` 会先清理再重装。
+
+## 交互式界面（TUI）
+
+```bash
+udev tui
+```
+
+直接在终端中打开仪表盘，集中查看和操作工具链、开发工具、仓库、Release 与配置。界面使用备用屏幕，按 `q` 退出后终端内容会恢复。
+
+| 按键 | 功能 |
+| --- | --- |
+| `1`-`6` / `Tab` | 切换页面（概览 / 工具 / 开发工具 / 仓库 / Release / 配置） |
+| `↑` `↓` / `j` `k` | 移动选择或滚动 |
+| `Enter` | 执行当前项，或打开工具操作菜单 |
+| `r` | 重新读取配置与状态 |
+| `?` | 显示/关闭快捷键帮助 |
+| `q` / `Ctrl-C` | 退出 |
+
+页面内快捷键：
+
+```text
+工具页      i 安装（已安装时重装）  b 备份  s 恢复  u 卸载  a 安装所有缺失工具
+开发工具页  Enter 执行选中分组  a 默认全部（node/go/python）  A 全部（含 cargo）
+仓库页      Enter 更新选中  a 全部更新  c 只检查更新
+Release 页  Enter 下载选中  a 全部下载  f 切换是否覆盖已有文件
+配置页      ↑↓ 滚动查看合并后的配置；编辑请退出后运行 udev config edit
+日志页      Esc 返回  ↑↓ 滚动  End 回到最新  x 取消运行中的操作
+```
+
+所有安装、备份、恢复、卸载、克隆与下载操作都在后台执行，日志会显示在操作面板中。运行期间可以按 `Esc` 返回列表，或用 `x` 取消支持取消的操作；完成后会自动刷新状态。
+
+> TUI 依赖 Unix 终端与 `stty`，目前支持 Linux/macOS。Windows 或非交互环境请继续使用命令行子命令。
 
 ## 自更新与本地源码
 
@@ -301,6 +344,54 @@ udev repos someone/newrepo     # 清单外的仓库也可临时克隆
 - `git` 仓库使用 `git pull --ff-only`，存在本地分叉时会报错而不会合并
 - 环境变量 `UDEV_REPOS_DIR`、`UDEV_REPOS_TOOL` 可覆盖配置
 
+## 一键下载 Release 文件
+
+`udev release` 会按配置下载 GitHub Release 中的文件。默认清单：
+
+```text
+iina/iina                       IINA.v*.dmg
+gauthierpiarrette/highball      Highball.dmg
+shinchiro/mpv-winbuild-cmake    *mpv-x86_64-v3-*.7z
+```
+
+工具选择规则：
+
+- 安装并已登录 `gh` 时，优先执行 `gh release download --repo <repo> --pattern <pattern> --dir <dir>`
+- 否则使用 GitHub API 查找 Release 资产并直接下载（curl/wget 仅 Bash 版需要，Go 版使用内置 HTTP）
+- 可用 `--tool gh` 强制 gh，或用 `--tool api` 强制 API
+- 仅下载与 pattern 匹配的文件；同名文件已存在时跳过，`--force` 覆盖
+
+常用用法：
+
+```bash
+udev release                       # 下载默认清单到 ~/.udev/git/release
+udev release --list                # 只列出将下载的文件
+udev release --dir ~/Downloads     # 指定下载目录
+udev release iina highball         # 只下载匹配的仓库
+udev release someone/repo#*.zip    # 临时下载清单外的仓库
+udev release --gh                  # 强制使用 gh
+udev release --api                 # 强制使用 GitHub API
+udev release --force               # 覆盖已存在的文件
+```
+
+默认目录为 `~/.udev/git/release`，也可以在 `~/.udev/config.yaml` 中修改；已有配置文件缺少 `releases` 段时，运行任意 `udev` 命令会自动追加默认清单：
+
+```yaml
+releases:
+  dir: ~/.udev/git/release   # 下载目录，默认 ~/.udev/git/release
+  tool: auto             # auto | gh | api，auto 时 gh 已登录优先 gh
+  list:
+    - repo: iina/iina
+      pattern: IINA.v*.dmg
+      # tag: 1.4.0       # 可选，默认最新 Release
+    - repo: gauthierpiarrette/highball
+      pattern: Highball.dmg
+    - repo: shinchiro/mpv-winbuild-cmake
+      pattern: "*mpv-x86_64-v3-*.7z"
+```
+
+环境变量 `UDEV_RELEASES_DIR`、`UDEV_RELEASES_TOOL` 可覆盖配置；启用镜像（`USE_CN_MIRROR=1`）时，API 下载会尝试使用配置中的 `mirror.github_proxy`。
+
 ## 自定义工具清单
 
 所有下载/安装项都在 `~/.udev/config.yaml` 的 `dev_tools` 下，直接编辑即可，无需重新编译：
@@ -367,6 +458,7 @@ uninstall:     # 卸载行为（是否默认删除 GOPATH）
 storage:       # 云存储、凭据、restic 仓库与源码目录
 update:        # 自更新来源（GitHub repo / branch）
 repos:         # 批量克隆/更新仓库的目录、工具与清单
+releases:      # 一键下载 Release 的目录、工具与文件清单
 ```
 
 常用环境变量（优先级高于配置文件）：
@@ -376,6 +468,7 @@ repos:         # 批量克隆/更新仓库的目录、工具与清单
 - `PYENV_ROOT`、`NVM_DIR`、`GOPATH`、`RUSTUP_HOME`、`CARGO_HOME`
 - `FVM_CACHE_PATH`、`FVM_INSTALL_DIR`
 - `UDEV_REPOS_DIR`、`UDEV_REPOS_TOOL`
+- `UDEV_RELEASES_DIR`、`UDEV_RELEASES_TOOL`
 - `USE_CN_MIRROR=1` 或 `UDEV_USE_CN=1`
 - `CN_GITHUB_PROXY`、`CN_NODE_MIRROR`、`CN_GO_MIRROR`、`CN_PYTHON_MIRROR`
 

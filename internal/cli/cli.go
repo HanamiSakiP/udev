@@ -15,15 +15,17 @@ import (
 	"github.com/hanamisakip/udev/internal/config"
 	"github.com/hanamisakip/udev/internal/devtools"
 	"github.com/hanamisakip/udev/internal/manager"
+	"github.com/hanamisakip/udev/internal/releases"
 	"github.com/hanamisakip/udev/internal/repos"
 	"github.com/hanamisakip/udev/internal/selfupdate"
 	"github.com/hanamisakip/udev/internal/storage"
+	"github.com/hanamisakip/udev/internal/tui"
 	"github.com/hanamisakip/udev/internal/ui"
 	"github.com/hanamisakip/udev/internal/uninstall"
 )
 
 // Version 由构建时通过 -ldflags 覆盖，或直接修改此处。
-var Version = "1.0.1"
+var Version = "1.0.2"
 
 // Run 执行命令行，返回进程退出码。
 func Run(args []string) int {
@@ -78,6 +80,12 @@ func Run(args []string) int {
 		err = cmdRestore(ctx, cfg, u, rest)
 	case "status", "st", "s":
 		err = cmdStatus(cfg, u)
+	case "tui", "dashboard":
+		if hasHelp(rest) {
+			printHelp(u)
+			return 0
+		}
+		err = tui.Run(ctx, cfg, Version)
 	case "list", "ls", "l":
 		err = cmdList(cfg, u, rest)
 	case "tools", "dev", "dev-tool":
@@ -92,6 +100,12 @@ func Run(args []string) int {
 			return 0
 		}
 		err = repos.Run(ctx, cfg, u, rest)
+	case "release", "releases", "dl", "download":
+		if hasHelp(rest) {
+			printHelp(u)
+			return 0
+		}
+		err = releases.Run(ctx, cfg, u, rest)
 	case "uninstall", "remove", "rm":
 		err = cmdUninstall(ctx, cfg, u, rest)
 	case "config", "cfg":
@@ -353,6 +367,15 @@ func cmdStatus(cfg *config.Config, u *ui.UI) error {
 	fmt.Fprintf(u.Out, "  工具   : %s（auto 时优先 jj）\n", cfg.Repos.Tool)
 	fmt.Fprintf(u.Out, "  数量   : %d 个\n", len(cfg.Repos.List))
 
+	releaseDir := cfg.Releases.Dir
+	if releaseDir == "" {
+		releaseDir = filepath.Join(cfg.Home, "git", "release")
+	}
+	fmt.Fprintf(u.Out, "\n%s\n", u.Bold("Release 下载清单"))
+	fmt.Fprintf(u.Out, "  目录   : %s\n", releaseDir)
+	fmt.Fprintf(u.Out, "  工具   : %s（auto 时 gh 已登录优先 gh）\n", cfg.Releases.Tool)
+	fmt.Fprintf(u.Out, "  数量   : %d 个\n", len(cfg.Releases.List))
+
 	fmt.Fprintf(u.Out, "\n配置目录: %s\n", cfg.Home)
 	fmt.Fprintf(u.Out, "配置文件: %s\n", cfg.File)
 	fmt.Fprintf(u.Out, "备份目录: %s\n", cfg.Paths.BackupDir)
@@ -541,9 +564,11 @@ func printHelp(u *ui.UI) {
   backup    备份已安装的工具
   restore   从备份恢复工具（已安装时跳过，除非 --force）
   status    查看工具安装状态、版本与备份数量
+  tui       打开交互式终端界面（仪表盘与操作面板）
   list      列出可用备份
   tools     按配置文件批量安装开发工具
   repos     一键批量克隆/更新配置中的仓库（优先 jj）
+  release   一键下载配置中的 GitHub Release 文件（gh 已登录优先 gh）
   uninstall 卸载工具链并清理 shell 配置
   update    从 GitHub 更新 udev 自身，并同步本地源码
   setup     一键配置 gh 登录、云存储与 restic 本地仓库
@@ -589,12 +614,29 @@ repos 选项:
   --jj | --git | --gh          快捷指定工具
   也接受仓库名、owner/repo 或完整地址，只处理匹配项
 
+release 选项:
+  --tool, -t <auto|gh|api>     下载工具，默认 auto（gh 已登录时优先 gh）
+  --dir, -d <路径>             覆盖下载目录（默认 ~/.udev/git/release）
+  --list, -l                   只列出将下载的文件
+  --force, -f                  覆盖已存在的文件
+  --gh | --api                 快捷指定工具
+  也接受仓库名、owner/repo 或 owner/repo#pattern，只处理匹配项
+
+tui 快捷键:
+  1-6 / Tab 切换页面   ↑↓ / j k 移动   Enter 执行   r 刷新   ? 帮助   q 退出
+  工具页: i 安装  b 备份  s 恢复  u 卸载  a 安装缺失工具
+  开发工具页: a 默认全部  A 含 cargo
+  仓库页: a 全部更新  c 检查更新
+  Release 页: a 全部下载  f 切换覆盖
+  日志页: Esc 返回  ↑↓ 滚动  End 回到最新  x 取消运行中的操作
+
 配置/存储目录:
   %s
   配置文件: %s
 
 示例:
   udev status
+  udev tui
   udev install --cn all
   udev install --force pyenv
   udev backup all
@@ -605,6 +647,10 @@ repos 选项:
   udev repos --check
   udev repos --tool git
   udev repos vaultwarden u-ani
+  udev release
+  udev release --list
+  udev release --dir ~/Downloads iina
+  udev release someone/repo#*.zip
   udev uninstall -y -k
   udev update
   udev setup
@@ -614,9 +660,11 @@ repos 选项:
 说明:
   - npm/go/pip/cargo 工具清单全部位于配置文件中，直接编辑即可自定义
   - repos 的目录、工具与仓库清单同样在配置文件的 repos 段中修改
+  - release 的下载目录、工具与文件清单在配置文件的 releases 段中修改
   - 环境变量可覆盖配置：UDEV_HOME、UDEV_BACKUP_DIR、PYENV_ROOT、NVM_DIR、
     GOPATH、RUSTUP_HOME、CARGO_HOME、FVM_CACHE_PATH、FVM_INSTALL_DIR、
-    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、USE_CN_MIRROR=1
+    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、UDEV_RELEASES_DIR、UDEV_RELEASES_TOOL、
+    USE_CN_MIRROR=1
 `, u.Bold("udev"), Version, "~/.udev", "~/.udev/config.yaml")
 	fmt.Fprint(u.Out, help)
 }

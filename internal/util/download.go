@@ -78,11 +78,19 @@ func downloadOnce(ctx context.Context, url, out string) error {
 
 // Fetch 下载并返回内容。
 func Fetch(ctx context.Context, url string) ([]byte, error) {
+	return FetchHeaders(ctx, url, nil)
+}
+
+// FetchHeaders 下载并返回内容，可附加请求头。
+func FetchHeaders(ctx context.Context, url string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "udev")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err

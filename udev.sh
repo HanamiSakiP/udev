@@ -5,7 +5,7 @@
 # 只依赖 bash / tar / 常见 Unix 工具；下载需要 curl 或 wget。
 set -uo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
   echo "udev 需要 bash 4.3 或更高版本（当前: ${BASH_VERSION:-unknown}）" >&2
@@ -342,6 +342,16 @@ repos:
     - HanamiSakiP/u-comic
     - HanamiSakiP/u-game
     - HanamiSakiP/udev
+releases:
+  dir: $HOME_DIR/git/release
+  tool: auto
+  list:
+    - repo: iina/iina
+      pattern: IINA.v*.dmg
+    - repo: gauthierpiarrette/highball
+      pattern: Highball.dmg
+    - repo: shinchiro/mpv-winbuild-cmake
+      pattern: "*mpv-x86_64-v3-*.7z"
 EOF
 }
 
@@ -429,6 +439,8 @@ apply_env() {
   _env_pick mirror.python CN_PYTHON_MIRROR
   _env_pick repos.dir UDEV_REPOS_DIR
   _env_pick repos.tool UDEV_REPOS_TOOL
+  _env_pick releases.dir UDEV_RELEASES_DIR
+  _env_pick releases.tool UDEV_RELEASES_TOOL
   if [[ -n ${UDEV_USE_CN-} ]]; then
     _CFG[mirror.use_cn]=$UDEV_USE_CN
   elif [[ -n ${USE_CN_MIRROR-} ]]; then
@@ -449,7 +461,7 @@ init_paths() {
   FVM_INSTALL=$(expand_path "$(cfg_key paths.fvm_install)")
 
   SHELL_FILES=()
-  local n i repos_raw
+  local n i repos_raw rel_raw
   repos_raw=$(cfg_key repos.dir)
   if [[ -n $repos_raw ]]; then
     REPOS_DIR=$(expand_path "$repos_raw")
@@ -460,6 +472,15 @@ init_paths() {
   REPOS_TOOL=${REPOS_TOOL:-auto}
   REPOS_PROTOCOL=$(cfg_key repos.protocol)
   REPOS_PROTOCOL=${REPOS_PROTOCOL:-https}
+
+  rel_raw=$(cfg_key releases.dir)
+  if [[ -n $rel_raw ]]; then
+    RELEASES_DIR=$(expand_path "$rel_raw")
+  else
+    RELEASES_DIR="$HOME_DIR/git/release"
+  fi
+  RELEASES_TOOL=$(cfg_key releases.tool)
+  RELEASES_TOOL=${RELEASES_TOOL:-auto}
 
   n=$(seq_len shell.files)
   for ((i = 0; i < n; i++)); do
@@ -508,6 +529,30 @@ ensure_repos_section() {
     done
   } >>"$CONFIG_FILE" || return 1
   info "已写入默认仓库清单: $CONFIG_FILE"
+}
+
+ensure_releases_section() {
+  [[ -f $CONFIG_FILE ]] || return 0
+  grep -qE '^releases:' "$CONFIG_FILE" && return 0
+  local n i repo pattern tag
+  n=$(seq_len releases.list)
+  {
+    printf '\n# Release 下载清单（默认值，可按需增删）\n'
+    printf 'releases:\n'
+    printf '  dir: %s/git/release\n' "$HOME_DIR"
+    printf '  tool: auto\n'
+    printf '  list:\n'
+    for ((i = 0; i < n; i++)); do
+      repo=$(cfg_key "releases.list[$i].repo")
+      pattern=$(cfg_key "releases.list[$i].pattern")
+      tag=$(cfg_key "releases.list[$i].tag")
+      [[ -n $repo ]] || continue
+      printf '    - repo: %s\n' "$repo"
+      printf '      pattern: "%s"\n' "${pattern//\"/\\\"}"
+      [[ -n $tag ]] && printf '      tag: %s\n' "$tag"
+    done
+  } >>"$CONFIG_FILE" || return 1
+  info "已写入默认 Release 下载清单: $CONFIG_FILE"
 }
 
 ensure_go_packages() {
@@ -613,6 +658,7 @@ ensure_config() {
   else
     ensure_go_packages || return 1
     ensure_repos_section || return 1
+    ensure_releases_section || return 1
   fi
 }
 
@@ -2069,6 +2115,432 @@ cmd_repos() {
 }
 
 # ---------------------------------------------------------------------------
+# 命令：release 一键下载 GitHub Release 文件
+# ---------------------------------------------------------------------------
+
+release_normalize_repo() { # spec -> owner/repo
+  local s=$1
+  s=${s#https://}
+  s=${s#http://}
+  s=${s#github.com/}
+  s=${s#git@github.com:}
+  s=${s%.git}
+  s=${s%/}
+  if [[ $s == */*/* ]]; then
+    s=${s#*/}
+  fi
+  if [[ $s != */* || $s == /* || $s == */ ]]; then
+    err "无效仓库: $1（应为 owner/repo）"
+    return 1
+  fi
+  printf '%s' "$s"
+}
+
+gh_logged_in() {
+  command -v gh >/dev/null 2>&1 || return 1
+  gh auth status --hostname github.com >/dev/null 2>&1
+}
+
+release_api_curl() { # url token outfile
+  local url=$1 token=$2 out=$3 flag
+  local -a opts=()
+  for flag in ipv6 ipv4; do
+    opts=()
+    [[ $flag == ipv4 ]] && opts=(-4)
+    if [[ -n $token ]]; then
+      if curl "${opts[@]}" -fsSL --connect-timeout 15 \
+        -H 'Accept: application/vnd.github+json' -H 'User-Agent: udev' \
+        -H "Authorization: Bearer $token" -o "$out" "$url"; then
+        return 0
+      fi
+    else
+      if curl "${opts[@]}" -fsSL --connect-timeout 15 \
+        -H 'Accept: application/vnd.github+json' -H 'User-Agent: udev' \
+        -o "$out" "$url"; then
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+release_api_get() { # url
+  local url=$1 token=${GH_TOKEN:-${GITHUB_TOKEN:-}} tmp
+  if [[ -z $token && -f $HOME_DIR/secrets/gh-token ]]; then
+    token=$(tr -d '\r\n' <"$HOME_DIR/secrets/gh-token" 2>/dev/null || true)
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/udev-release-api-XXXXXX") || return 1
+    if release_api_curl "$url" "$token" "$tmp"; then
+      cat "$tmp"
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp"
+    return 1
+  elif command -v wget >/dev/null 2>&1; then
+    if [[ -n $token ]]; then
+      wget -qO- --timeout=30 --header='Accept: application/vnd.github+json' --header='User-Agent: udev' \
+        --header="Authorization: Bearer $token" "$url"
+    else
+      wget -qO- --timeout=30 --header='Accept: application/vnd.github+json' --header='User-Agent: udev' "$url"
+    fi
+  else
+    err "未找到 curl 或 wget，无法访问 GitHub API"
+    return 1
+  fi
+}
+
+release_asset_urls() {
+  grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    sed -e 's/^.*"\(https[^"]*\)"[[:space:]]*$/\1/'
+}
+
+release_asset_urls_for() { # repo [tag]
+  local repo=$1 tag=${2-} api json urls
+  if [[ -n $tag ]]; then
+    api="https://api.github.com/repos/$repo/releases/tags/$tag"
+  else
+    api="https://api.github.com/repos/$repo/releases/latest"
+  fi
+  if json=$(release_api_get "$api"); then
+    urls=$(printf '%s\n' "$json" | release_asset_urls)
+    if [[ -n $urls ]]; then
+      printf '%s\n' "$urls"
+      return 0
+    fi
+  fi
+  if [[ -z $tag ]]; then
+    json=$(release_api_get "https://api.github.com/repos/$repo/releases?per_page=1") || return 1
+    urls=$(printf '%s\n' "$json" | release_asset_urls)
+    [[ -n $urls ]] || return 1
+    printf '%s\n' "$urls"
+    return 0
+  fi
+  return 1
+}
+
+release_download_url() {
+  local u=$1 proxy
+  if ! is_cn; then
+    printf '%s' "$u"
+    return
+  fi
+  proxy=$(cfg_key mirror.github_proxy)
+  proxy=${proxy%/}
+  if [[ -n $proxy && $u == https://github.com/* ]]; then
+    printf '%s/%s' "$proxy" "$u"
+  else
+    printf '%s' "$u"
+  fi
+}
+
+release_download_file() { # url out
+  local url=$1 out=$2 tmp="$2.part" flag
+  if ! command -v curl >/dev/null 2>&1; then
+    download "$url" "$out"
+    return
+  fi
+  local -a opts=()
+  for flag in ipv6 ipv4; do
+    opts=()
+    [[ $flag == ipv4 ]] && opts=(-4)
+    rm -f "$tmp"
+    if curl "${opts[@]}" -fsSL --connect-timeout 15 -o "$tmp" "$url" && [[ -f $tmp ]]; then
+      mv -f "$tmp" "$out"
+      return 0
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+cmd_release() {
+  local tool="" dir="" list_only=0 force=0 a i n repo pattern tag matched arg lower
+  local downloads=0 skipped=0 got name dest u urlfile
+  local -a args=() repos=() patterns=() tags=() failed=() missing=()
+
+  while (($#)); do
+    a=$1
+    shift
+    case $a in
+      -h | --help)
+        print_help
+        return 0
+        ;;
+      --list | -l) list_only=1 ;;
+      --force | -f) force=1 ;;
+      --gh) tool=gh ;;
+      --api) tool=api ;;
+      --tool | -t)
+        if (($#)); then
+          tool=$1
+          shift
+        else
+          err "$a 需要一个值（auto|gh|api）"
+          return 1
+        fi
+        ;;
+      --tool=*) tool=${a#*=} ;;
+      --dir | -d)
+        if (($#)); then
+          dir=$1
+          shift
+        else
+          err "$a 需要一个目录"
+          return 1
+        fi
+        ;;
+      --dir=*) dir=${a#*=} ;;
+      -*)
+        err "未知参数: $a"
+        return 1
+        ;;
+      *) args+=("$a") ;;
+    esac
+  done
+
+  [[ -n $tool ]] || tool=$RELEASES_TOOL
+  [[ -n $tool ]] || tool=auto
+
+  if [[ -n $dir ]]; then
+    dir=$(expand_path "$dir")
+  elif [[ -n $RELEASES_DIR ]]; then
+    dir=$RELEASES_DIR
+  else
+    dir="$HOME_DIR/git/release"
+  fi
+
+  # 添加下载项并去重（利用调用方的动态作用域写入数组）
+  _release_add() {
+    local r p t=${3-} x
+    r=$(release_normalize_repo "$1") || return 1
+    p=${2:-*}
+    t=${3-}
+    for ((x = 0; x < ${#repos[@]}; x++)); do
+      if [[ ${repos[x]} == "$r" && ${patterns[x]} == "$p" && ${tags[x]} == "$t" ]]; then
+        return 0
+      fi
+    done
+    repos+=("$r")
+    patterns+=("$p")
+    tags+=("$t")
+  }
+
+  if ((${#args[@]} == 0)); then
+    n=$(seq_len releases.list)
+    for ((i = 0; i < n; i++)); do
+      repo=$(cfg_key "releases.list[$i].repo")
+      [[ -n $repo ]] || continue
+      pattern=$(cfg_key "releases.list[$i].pattern")
+      tag=$(cfg_key "releases.list[$i].tag")
+      _release_add "$repo" "$pattern" "$tag" || return 1
+    done
+  else
+    for arg in "${args[@]}"; do
+      if [[ $arg == *"#"* && $arg != "#"* ]]; then
+        _release_add "${arg%%#*}" "${arg#*#}" "" || return 1
+        continue
+      fi
+      matched=0
+      lower=${arg,,}
+      n=$(seq_len releases.list)
+      for ((i = 0; i < n; i++)); do
+        repo=$(cfg_key "releases.list[$i].repo")
+        [[ -n $repo ]] || continue
+        pattern=$(cfg_key "releases.list[$i].pattern")
+        tag=$(cfg_key "releases.list[$i].tag")
+        if [[ ${repo##*/} == "$lower" || ${repo,,} == "$lower" || ${repo,,} == *"$lower"* ]]; then
+          _release_add "$repo" "$pattern" "$tag" || return 1
+          matched=1
+        fi
+      done
+      ((matched)) || missing+=("$arg")
+    done
+    if ((${#missing[@]})); then
+      err "配置中没有匹配的 Release: ${missing[*]}（可写 owner/repo 或 owner/repo#pattern）"
+      return 1
+    fi
+  fi
+
+  if ((${#repos[@]} == 0)); then
+    err "没有需要下载的文件"
+    return 1
+  fi
+
+  header "udev release"
+  info "下载目录: $dir"
+  info "文件数量: ${#repos[@]}"
+
+  if ((list_only)); then
+    info "使用工具: $tool（auto 时 gh 已登录优先 gh，否则使用 GitHub API）"
+    printf '\n'
+    for ((i = 0; i < ${#repos[@]}; i++)); do
+      repo=${repos[i]}
+      [[ -n ${tags[i]} ]] && repo="$repo@${tags[i]}"
+      printf '  %-34s %-28s %s\n' "$repo" "${patterns[i]}" "$(dim "$dir")"
+    done
+    return 0
+  fi
+
+  case $tool in
+    auto)
+      if gh_logged_in; then
+        tool=gh
+      else
+        if command -v gh >/dev/null 2>&1; then
+          info "gh 已安装但未登录，回退到 GitHub API（可运行 udev setup gh 启用 gh）"
+        fi
+        tool=api
+      fi
+      ;;
+    gh)
+      if ! command -v gh >/dev/null 2>&1; then
+        err "未找到 gh，请先安装 GitHub CLI（udev tools go），或改用 --tool api"
+        return 1
+      fi
+      if ! gh_logged_in; then
+        err "gh 未登录，请先运行 udev setup gh，或改用 --tool api"
+        return 1
+      fi
+      ;;
+    api | curl | wget) tool=api ;;
+    *)
+      err "不支持的工具: $tool（可选: auto gh api）"
+      return 1
+      ;;
+  esac
+
+  if [[ $tool == gh ]]; then
+    info "使用工具: gh（已登录，优先使用）"
+  else
+    info "使用工具: GitHub API"
+  fi
+
+  mkdir -p "$dir" || {
+    err "创建下载目录失败: $dir"
+    return 1
+  }
+
+  for ((i = 0; i < ${#repos[@]}; i++)); do
+    repo=${repos[i]}
+    pattern=${patterns[i]}
+    tag=${tags[i]}
+    printf '\n%s ==> [%d/%d] %s\n' "$(bold '')" "$((i + 1))" "${#repos[@]}" "$repo"
+    subst "pattern: $pattern"
+    [[ -n $tag ]] && subst "tag: $tag"
+
+    if [[ $tool == gh ]]; then
+      local -a vargs=(release view) gargs=() matched_names=()
+      local line names_out
+      [[ -n $tag ]] && vargs+=("$tag")
+      vargs+=(--repo "$repo" --json assets --jq '.assets[].name')
+      if ! names_out=$(gh "${vargs[@]}" 2>/dev/null); then
+        err "$repo 获取 Release 资产列表失败"
+        failed+=("$repo")
+        continue
+      fi
+      while IFS= read -r line; do
+        [[ -n $line ]] || continue
+        [[ $line == $pattern ]] && matched_names+=("$line")
+      done <<<"$names_out"
+      if ((${#matched_names[@]} == 0)); then
+        err "$repo 没有匹配 $pattern 的文件"
+        failed+=("$repo")
+        continue
+      fi
+      got=0
+      for line in "${matched_names[@]}"; do
+        name=${line##*/}
+        dest="$dir/$name"
+        if [[ -e $dest ]] && ((force == 0)); then
+          warn "$name 已存在，跳过（--force 覆盖）"
+          skipped=$((skipped + 1))
+          continue
+        fi
+        gargs=(release download --repo "$repo" --pattern "$name" --dir "$dir")
+        [[ -n $tag ]] && gargs+=(--tag "$tag")
+        ((force)) && gargs+=(--clobber)
+        if gh "${gargs[@]}"; then
+          ok "已保存: $dest"
+          got=$((got + 1))
+          downloads=$((downloads + 1))
+        else
+          err "下载 $name 失败"
+          got=-1
+          break
+        fi
+      done
+      if ((got < 0)); then
+        failed+=("$repo")
+        continue
+      fi
+      if ((got == 0)); then
+        ok "$repo 已是最新（文件已存在，已跳过）"
+      else
+        ok "$repo 完成"
+      fi
+      continue
+    fi
+
+    if ! urlfile=$(mktemp "${TMPDIR:-/tmp}/udev-release-urls-XXXXXX"); then
+      err "$repo 创建临时文件失败"
+      failed+=("$repo")
+      continue
+    fi
+    if ! release_asset_urls_for "$repo" "$tag" >"$urlfile" 2>/dev/null; then
+      rm -f "$urlfile"
+      err "$repo 获取 Release 资产失败（可运行 udev setup gh 使用 gh 下载）"
+      failed+=("$repo")
+      continue
+    fi
+    got=0
+    while IFS= read -r u; do
+      [[ -n $u ]] || continue
+      name=${u%%\?*}
+      name=${name##*/}
+      [[ $name == $pattern ]] || continue
+      dest="$dir/$name"
+      if [[ -e $dest ]] && ((force == 0)); then
+        warn "$name 已存在，跳过（--force 覆盖）"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      subst "下载 $name"
+      if release_download_file "$(release_download_url "$u")" "$dest"; then
+        ok "已保存: $dest"
+        got=$((got + 1))
+        downloads=$((downloads + 1))
+      else
+        err "下载 $name 失败"
+        got=-1
+        break
+      fi
+    done <"$urlfile"
+    rm -f "$urlfile"
+
+    if ((got < 0)); then
+      failed+=("$repo")
+      continue
+    fi
+    if ((got == 0)); then
+      err "$repo 没有匹配 $pattern 的文件"
+      failed+=("$repo")
+      continue
+    fi
+    ok "$repo 完成"
+  done
+
+  printf '\n'
+  info "完成: 下载 $downloads 个文件，跳过 $skipped 个已存在文件"
+  if ((${#failed[@]})); then
+    err "以下 Release 下载失败: ${failed[*]}"
+    return 1
+  fi
+  ok "=== 全部完成 ==="
+}
+
+# ---------------------------------------------------------------------------
 # 命令：install / backup / restore / status / list / config
 # ---------------------------------------------------------------------------
 
@@ -2314,6 +2786,11 @@ cmd_status() {
   printf '  目录   : %s\n' "$REPOS_DIR"
   printf '  工具   : %s（auto 时优先 jj）\n' "$REPOS_TOOL"
   printf '  数量   : %d 个\n' "$(seq_len repos.list)"
+
+  printf '\n%s\n' "$(bold 'Release 下载清单')"
+  printf '  目录   : %s\n' "${RELEASES_DIR:-$HOME_DIR/git/release}"
+  printf '  工具   : %s（auto 时 gh 已登录优先 gh）\n' "$RELEASES_TOOL"
+  printf '  数量   : %d 个\n' "$(seq_len releases.list)"
 
   printf '\n配置目录: %s\n' "$HOME_DIR"
   printf '配置文件: %s\n' "$CONFIG_FILE"
@@ -3179,7 +3656,7 @@ comp_words() {
   for w in "${used[@]}"; do
     [[ $w == -* ]] && continue
     case $w in
-      install | i | backup | b | restore | r | recover | status | st | s | list | ls | l | tools | dev | dev-tool | repos | repo | clone | uninstall | remove | rm | config | cfg | completion) sub=$w ;;
+      install | i | backup | b | restore | r | recover | status | st | s | list | ls | l | tools | dev | dev-tool | repos | repo | clone | release | releases | dl | download | uninstall | remove | rm | config | cfg | completion) sub=$w ;;
     esac
     break
   done
@@ -3192,10 +3669,11 @@ comp_words() {
   local -a restore_flags=(--force -f --help -h)
   local -a uninstall_flags=(-y --yes -k --keep-gopath --help -h)
   local -a repos_flags=(--tool -t --dir -d --list -l --check -c --jj --git --gh --help -h)
+  local -a release_flags=(--tool -t --dir -d --list -l --force -f --gh --api --help -h)
 
   case $sub in
     "")
-      cands=(install backup restore status list tools repos uninstall config completion version help --help --version -h -v)
+      cands=(install backup restore status list tools repos release uninstall config completion version help --help --version -h -v)
       ;;
     install | i) cands=("${tools[@]}" "${install_flags[@]}") ;;
     backup | b | list | ls | l) cands=("${tools[@]}" --help -h) ;;
@@ -3212,9 +3690,18 @@ comp_words() {
         [[ -n $rn_spec ]] && cands+=("$(repo_name "$rn_spec")")
       done
       ;;
+    release | releases | dl | download)
+      cands=("${release_flags[@]}")
+      if ((${#_CFG[@]} == 0)); then load_config >/dev/null 2>&1 || true; fi
+      local rl_n rl_i rl_spec
+      rl_n=$(seq_len releases.list)
+      for ((rl_i = 0; rl_i < rl_n; rl_i++)); do
+        rl_spec=$(cfg_key "releases.list[$rl_i].repo")
+        [[ -n $rl_spec ]] && cands+=("$(repo_name "$rl_spec")")
+      done
+      ;;
     config | cfg)
-      if ((${#used[@]} >= 2)) && [[ ${used[1]} != -* ]]; then
-        if [[ ${used[1]} == init ]]; then
+      if ((${#used[@]} >= 2)) && [[ ${used[1]} != -* ]]; then        if [[ ${used[1]} == init ]]; then
           cands=(--force -f --help -h)
         else
           cands=(--help -h)
@@ -3231,7 +3718,7 @@ comp_words() {
       fi
       ;;
     status | st | s | version | help) cands=(--help -h) ;;
-    *) cands=(install backup restore status list tools repos uninstall config completion version help --help --version -h -v) ;;
+    *) cands=(install backup restore status list tools repos release uninstall config completion version help --help --version -h -v) ;;
   esac
 
   for c in "${cands[@]}"; do
@@ -3261,6 +3748,7 @@ $(bold udev) v$VERSION - 一体化开发工具管理器（纯 Bash 版，无需 
   list      列出可用备份
   tools     按配置文件批量安装开发工具
   repos     一键批量克隆/更新配置中的仓库（优先 jj）
+  release   一键下载配置中的 GitHub Release 文件（gh 已登录优先 gh）
   uninstall 卸载工具链并清理 shell 配置
   config    查看/编辑配置（show | path | init | edit）
   completion 生成或安装 shell Tab 补全（bash | zsh | fish | install）
@@ -3295,6 +3783,14 @@ repos 选项:
   --jj | --git | --gh          快捷指定工具
   也接受仓库名、owner/repo 或完整地址，只处理匹配项
 
+release 选项:
+  --tool, -t <auto|gh|api>     下载工具，默认 auto（gh 已登录时优先 gh）
+  --dir, -d <路径>             覆盖下载目录（默认 ~/.udev/git/release）
+  --list, -l                   只列出将下载的文件
+  --force, -f                  覆盖已存在的文件
+  --gh | --api                 快捷指定工具
+  也接受仓库名、owner/repo 或 owner/repo#pattern，只处理匹配项
+
 配置/存储目录:
   ${HOME_DIR:-$HOME/.udev}
   配置文件: ${CONFIG_FILE:-$HOME/.udev/config.yaml}
@@ -3311,6 +3807,10 @@ repos 选项:
   udev repos --check
   udev repos --tool git
   udev repos vaultwarden u-ani
+  udev release
+  udev release --list
+  udev release --dir ~/Downloads iina
+  udev release someone/repo#*.zip
   udev uninstall -y -k
   udev config edit
 
@@ -3318,9 +3818,11 @@ repos 选项:
   - 与 Go 版共用同一份 config.yaml 与备份目录，可交替使用
   - npm/go/pip/cargo 工具清单全部位于配置文件中，直接编辑即可自定义
   - repos 的目录、工具与仓库清单同样在配置文件的 repos 段中修改
+  - release 的下载目录、工具与文件清单在配置文件的 releases 段中修改
   - 环境变量可覆盖配置：UDEV_HOME、UDEV_BACKUP_DIR、PYENV_ROOT、NVM_DIR、
     GOPATH、RUSTUP_HOME、CARGO_HOME、FVM_CACHE_PATH、FVM_INSTALL_DIR、
-    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、USE_CN_MIRROR=1
+    UDEV_REPOS_DIR、UDEV_REPOS_TOOL、UDEV_RELEASES_DIR、UDEV_RELEASES_TOOL、
+    USE_CN_MIRROR=1
   - 依赖：bash 4.3+、tar、git；下载需要 curl 或 wget
 EOF
 }
@@ -3377,6 +3879,10 @@ main() {
     repos | repo | clone)
       shift
       cmd_repos "$@"
+      ;;
+    release | releases | dl | download)
+      shift
+      cmd_release "$@"
       ;;
     uninstall | remove | rm)
       shift
